@@ -30,6 +30,8 @@ export const moderationSchema = z.object({
 
 export const chatMessageSchema = z.object({
   message: z.string().trim().min(1, 'Message cannot be empty').max(500, 'Message cannot exceed 500 characters'),
+  senderName: z.string().trim().min(1).max(60).optional(),
+  senderId: z.string().min(1).optional(),
 });
 
 export const savedTacticSchema = z.object({

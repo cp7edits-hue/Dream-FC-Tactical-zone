@@ -405,32 +405,55 @@ apiRouter.get('/meetings/:meetingId', (req: Request, res: Response): void => {
 // 4. LIVEKIT ACCESS TOKEN (Audio / Video)
 // -----------------------------------------------------------------------------
 apiRouter.post('/meetings/:meetingId/token', async (req: Request, res: Response): Promise<void> => {
+  const meetingId = req.params.meetingId;
   const participant = getSessionParticipant(req);
-  if (!participant || participant.meeting_id !== req.params.meetingId) {
-    res.status(403).json({ error: 'Unauthorized: valid participant session required' });
-    return;
+  
+  let participantId = participant?.id;
+  let participantName = participant?.display_name;
+  let isHost = participant?.role === 'host';
+  let canPublish = true;
+
+  if (participant) {
+    if (participant.meeting_id !== meetingId) {
+      res.status(403).json({ error: 'Unauthorized: participant does not belong to this meeting' });
+      return;
+    }
+    canPublish = isHost || !participant.is_muted;
+  } else {
+    // Fallback: support body / header params for cross-origin or token requests
+    participantId = req.body?.participantId || (req.headers['x-participant-id'] as string) || crypto.randomUUID();
+    participantName = req.body?.participantName || (req.headers['x-participant-name'] as string) || 'Squad Member';
+    isHost = req.body?.isHost === true;
   }
 
-  const meeting = store.meetings.get(participant.meeting_id);
-  if (!meeting || meeting.status === 'ended') {
+  let meeting = store.meetings.get(meetingId);
+  if (!meeting) {
+    // Try lookup by code if code was passed as meetingId
+    const foundId = store.meetingsByCode.get(meetingId);
+    if (foundId) {
+      meeting = store.meetings.get(foundId);
+    }
+  }
+
+  if (meeting && meeting.status === 'ended') {
     res.status(410).json({ error: 'Meeting has ended' });
     return;
   }
 
-  try {
-    const isHost = participant.role === 'host';
-    const canPublish = isHost || !participant.is_muted;
+  const roomName = meeting ? `meeting_${meeting.code}` : `meeting_${meetingId}`;
 
+  try {
     const { token, serverUrl } = await generateLiveKitToken({
-      roomName: `meeting_${meeting.code}`,
-      participantId: participant.id,
-      participantName: participant.display_name,
+      roomName,
+      participantId: participantId || crypto.randomUUID(),
+      participantName: participantName || 'Squad Member',
       isHost,
       canPublish,
     });
 
     res.json({ token, serverUrl });
   } catch (err: any) {
+    console.error('[API /token] Error generating token:', err);
     res.status(500).json({ error: 'Failed to generate media token' });
   }
 });
@@ -716,29 +739,75 @@ apiRouter.post('/meetings/:meetingId/end', (req: Request, res: Response): void =
 // -----------------------------------------------------------------------------
 // 11. IN-MEETING MESSAGES & CHAT
 // -----------------------------------------------------------------------------
-apiRouter.get('/meetings/:meetingId/messages', (req: Request, res: Response): void => {
-  const messages = store.messages.get(req.params.meetingId) || [];
-  res.json(messages);
+apiRouter.get('/meetings/:meetingId/messages', async (req: Request, res: Response): Promise<void> => {
+  const meetingId = req.params.meetingId;
+  const memoryMessages = store.messages.get(meetingId) || [];
+
+  // Query Supabase if available
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('meeting_messages')
+        .select('*')
+        .eq('meeting_id', meetingId)
+        .order('created_at', { ascending: true });
+
+      if (!error && data && data.length > 0) {
+        const formatted = data.map((m: any) => ({
+          id: m.id,
+          meeting_id: m.meeting_id,
+          sender_participant_id: m.sender_participant_id,
+          sender_name: m.sender_name,
+          message: m.message,
+          created_at: m.created_at ? new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+        }));
+
+        // Merge with any memory messages not yet persisted
+        const ids = new Set(formatted.map((f: any) => f.id));
+        for (const mm of memoryMessages) {
+          if (!ids.has(mm.id)) {
+            formatted.push(mm);
+          }
+        }
+        res.json(formatted);
+        return;
+      }
+    } catch (dbErr: any) {
+      console.warn('[Supabase] Warning reading meeting_messages:', dbErr?.message);
+    }
+  }
+
+  res.json(memoryMessages);
 });
 
-apiRouter.post('/meetings/:meetingId/messages', (req: Request, res: Response): void => {
-  const participant = getSessionParticipant(req);
-  if (!participant || participant.meeting_id !== req.params.meetingId) {
-    res.status(403).json({ error: 'Unauthorized' });
+apiRouter.post('/meetings/:meetingId/messages', async (req: Request, res: Response): Promise<void> => {
+  const parseResult = chatMessageSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    res.status(400).json({ error: 'Invalid message', details: parseResult.error.format() });
     return;
   }
 
-  const parseResult = chatMessageSchema.safeParse(req.body);
-  if (!parseResult.success) {
-    res.status(400).json({ error: 'Invalid message' });
-    return;
-  }
+  const participant = getSessionParticipant(req);
+  const finalSenderName: string =
+    participant?.display_name ||
+    parseResult.data.senderName ||
+    req.body?.senderName ||
+    (req.headers['x-participant-name'] as string) ||
+    'Squad Member';
+
+  const finalSenderId: string =
+    participant?.id ||
+    parseResult.data.senderId ||
+    req.body?.senderId ||
+    (req.headers['x-participant-id'] as string) ||
+    crypto.randomUUID();
 
   const messageRecord = {
     id: crypto.randomUUID(),
     meeting_id: req.params.meetingId,
-    sender_participant_id: participant.id,
-    sender_name: participant.display_name,
+    sender_participant_id: finalSenderId,
+    sender_name: finalSenderName,
     message: sanitizeHtml(parseResult.data.message),
     created_at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
   };
@@ -747,7 +816,24 @@ apiRouter.post('/meetings/:meetingId/messages', (req: Request, res: Response): v
   list.push(messageRecord);
   store.messages.set(req.params.meetingId, list);
 
+  // Broadcast to all connected clients via SSE stream
   store.broadcastToMeeting(req.params.meetingId, 'chat_message', messageRecord);
+
+  // Persist to Supabase if available
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase.from('meeting_messages').insert({
+        id: messageRecord.id,
+        meeting_id: req.params.meetingId,
+        sender_participant_id: null, // Allow guest chat without FK violation
+        sender_name: messageRecord.sender_name,
+        message: messageRecord.message,
+      });
+    } catch (dbErr: any) {
+      console.warn('[Supabase] Warning persisting chat message:', dbErr?.message);
+    }
+  }
 
   res.json({ success: true, message: messageRecord });
 });

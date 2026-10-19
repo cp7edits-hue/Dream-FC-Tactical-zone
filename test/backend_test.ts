@@ -124,6 +124,65 @@ async function runTests() {
     const healthData = await healthRes.json();
     assert.strictEqual(healthData.status, 'ok');
     console.log('   ✓ API Health check passed');
+
+    // 5E: LiveKit Media Token issuance
+    console.log('6. Testing LiveKit Token API endpoint...');
+    const tokenRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({
+        participantId: createData.participant.id,
+        participantName: createData.participant.displayName,
+        isHost: true,
+      }),
+    });
+    assert.strictEqual(tokenRes.status, 200, `Token request should return 200, got ${tokenRes.status}`);
+    const tokenData = await tokenRes.json();
+    assert(typeof tokenData.token === 'string' && tokenData.token.length > 20, 'Should return a valid JWT token');
+    assert(typeof tokenData.serverUrl === 'string', 'Should return serverUrl');
+    console.log('   ✓ LiveKit media token successfully issued for participant');
+
+    // 5F: Real-Time Tactical Chat endpoint (send message)
+    console.log('7. Testing Tactical Chat API endpoints...');
+    const sendMsgRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({
+        message: 'Maintain high pressing trap on their right fullback!',
+        senderName: 'Coach Pep',
+        senderId: createData.participant.id,
+      }),
+    });
+    assert.strictEqual(sendMsgRes.status, 200, `Send message should return 200, got ${sendMsgRes.status}`);
+    const sendMsgData = await sendMsgRes.json();
+    assert(sendMsgData.success === true, 'Send message should return success: true');
+    assert.strictEqual(sendMsgData.message.sender_name, 'Coach Pep');
+    assert.strictEqual(sendMsgData.message.message, 'Maintain high pressing trap on their right fullback!');
+    console.log('   ✓ In-meeting chat message successfully posted');
+
+    // 5G: Retrieve Chat Messages
+    const getMsgsRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/messages`);
+    assert.strictEqual(getMsgsRes.status, 200);
+    const getMsgsData = await getMsgsRes.json();
+    assert(Array.isArray(getMsgsData), 'Messages response should be an array');
+    assert(getMsgsData.length >= 1, 'Should have at least 1 message in history');
+    assert.strictEqual(getMsgsData[0].message, 'Maintain high pressing trap on their right fullback!');
+    console.log(`   ✓ In-meeting chat history retrieved (${getMsgsData.length} messages)`);
+
+    // 5H: Empty Chat Message validation rejection
+    const emptyMsgRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: '   ' }),
+    });
+    assert.strictEqual(emptyMsgRes.status, 400, 'Empty message should be rejected with 400');
+    console.log('   ✓ Empty chat message correctly rejected by validation schema');
   } finally {
     server.close();
   }

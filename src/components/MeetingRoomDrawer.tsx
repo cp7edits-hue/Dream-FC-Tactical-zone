@@ -1,14 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   X,
   Mic,
   MicOff,
-  Users,
   Copy,
   Check,
   Plus,
   Trash2,
-  FileText,
   LogOut,
   Radio,
   Lock,
@@ -16,18 +14,27 @@ import {
   MessageSquare,
   Shield,
   Send,
-  MoreVertical,
-  Edit3,
+  Users,
 } from 'lucide-react';
 import { MeetingSession } from '../types/tactics';
 import { LiveKitVideoRoom } from './LiveKitVideoRoom';
 import { api } from '../services/api';
+
+export interface ChatMessage {
+  id: string;
+  meeting_id?: string;
+  sender_participant_id?: string;
+  sender_name: string;
+  message: string;
+  created_at: string;
+}
 
 interface MeetingRoomDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   meeting: MeetingSession;
   isHost: boolean;
+  currentUser?: { id: string; name: string; role: string };
   boardRevision: number;
   onUpdateNotes: (notes: string[]) => void;
   onToggleMic: () => void;
@@ -35,6 +42,7 @@ interface MeetingRoomDrawerProps {
   onModerationAction: (participantId: string, action: string) => void;
   onToggleLock: () => void;
   isLocked: boolean;
+  incomingChatMessage?: ChatMessage | null;
 }
 
 export const MeetingRoomDrawer = ({
@@ -42,6 +50,7 @@ export const MeetingRoomDrawer = ({
   onClose,
   meeting,
   isHost,
+  currentUser,
   boardRevision,
   onUpdateNotes,
   onToggleMic,
@@ -49,35 +58,115 @@ export const MeetingRoomDrawer = ({
   onModerationAction,
   onToggleLock,
   isLocked,
+  incomingChatMessage,
 }: MeetingRoomDrawerProps) => {
   const [activeTab, setActiveTab] = useState<'video' | 'chat' | 'notes'>('video');
   const [newNote, setNewNote] = useState('');
   const [copied, setCopied] = useState(false);
 
   // Chat state
-  const [messages, setMessages] = useState<Array<{ id: string; sender_name: string; message: string; created_at: string }>>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Current participant info
+  const myParticipantName = currentUser?.name || (isHost ? meeting.hostName : 'Squad Member');
+  const myParticipantId = currentUser?.id || `p_${meeting.id}_user`;
+
+  // Auto scroll to bottom of chat
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // Load initial chat messages
   useEffect(() => {
     if (!meeting?.id) return;
+    setIsLoadingMessages(true);
+
     api.getMessages(meeting.id).then((list) => {
-      if (Array.isArray(list)) setMessages(list);
+      setIsLoadingMessages(false);
+      if (Array.isArray(list)) {
+        setMessages(list);
+      }
     });
   }, [meeting?.id]);
+
+  // Listen to incomingChatMessage prop from parent (SSE events)
+  useEffect(() => {
+    if (!incomingChatMessage) return;
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === incomingChatMessage.id)) return prev;
+      return [...prev, incomingChatMessage];
+    });
+
+    if (activeTab !== 'chat') {
+      setUnreadCount((c) => c + 1);
+    }
+  }, [incomingChatMessage, activeTab]);
+
+  // Also listen directly to BroadcastChannel for multi-tab instantaneous delivery
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window) || !meeting?.id) return;
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel(`dfc_realtime_${meeting.id}`);
+      bc.onmessage = (event) => {
+        if (event.data?.type === 'chat_message' && event.data.payload) {
+          const newMsg = event.data.payload as ChatMessage;
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === newMsg.id)) return prev;
+            return [...prev, newMsg];
+          });
+          if (activeTab !== 'chat') {
+            setUnreadCount((c) => c + 1);
+          }
+        }
+      };
+    } catch {}
+
+    return () => {
+      bc?.close();
+    };
+  }, [meeting?.id, activeTab]);
+
+  // Scroll to bottom when messages update in chat tab
+  useEffect(() => {
+    if (activeTab === 'chat') {
+      scrollToBottom();
+      setUnreadCount(0);
+    }
+  }, [messages, activeTab]);
 
   if (!isOpen) return null;
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim()) return;
+    const text = chatInput.trim();
+    if (!text || isSending) return;
+
+    setIsSending(true);
+    setChatInput('');
+
     try {
-      const res = await api.sendMessage(meeting.id, chatInput.trim());
+      const res = await api.sendMessage(meeting.id, text, {
+        id: myParticipantId,
+        name: myParticipantName,
+      });
+
       if (res.message) {
-        setMessages((prev) => [...prev, res.message]);
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === res.message.id)) return prev;
+          return [...prev, res.message];
+        });
       }
-      setChatInput('');
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[MeetingRoomDrawer] Send message notice:', err);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -123,6 +212,7 @@ export const MeetingRoomDrawer = ({
         <button
           onClick={onClose}
           className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+          title="Minimize drawer"
         >
           <X className="w-4 h-4" />
         </button>
@@ -170,20 +260,29 @@ export const MeetingRoomDrawer = ({
       <div className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-xl border border-slate-800 mb-2.5 text-xs font-semibold">
         <button
           onClick={() => setActiveTab('video')}
-          className={`flex-1 py-1 rounded-lg text-center transition-colors cursor-pointer ${
+          className={`flex-1 py-1 rounded-lg text-center transition-colors cursor-pointer flex items-center justify-center gap-1 ${
             activeTab === 'video' ? 'bg-[#a3e635] text-slate-950 shadow-sm' : 'text-slate-400 hover:text-white'
           }`}
         >
-          Media & Squad
+          <span>Media & Squad</span>
         </button>
+
         <button
-          onClick={() => setActiveTab('chat')}
-          className={`flex-1 py-1 rounded-lg text-center transition-colors cursor-pointer ${
+          onClick={() => {
+            setActiveTab('chat');
+            setUnreadCount(0);
+          }}
+          className={`relative flex-1 py-1 rounded-lg text-center transition-colors cursor-pointer flex items-center justify-center gap-1 ${
             activeTab === 'chat' ? 'bg-[#a3e635] text-slate-950 shadow-sm' : 'text-slate-400 hover:text-white'
           }`}
         >
-          Tactical Chat
+          <MessageSquare className="w-3 h-3" />
+          <span>Tactical Chat</span>
+          {unreadCount > 0 && activeTab !== 'chat' && (
+            <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse ml-0.5" />
+          )}
         </button>
+
         <button
           onClick={() => setActiveTab('notes')}
           className={`flex-1 py-1 rounded-lg text-center transition-colors cursor-pointer ${
@@ -197,14 +296,15 @@ export const MeetingRoomDrawer = ({
       {/* Tab 1: Video & Participant Moderation */}
       {activeTab === 'video' && (
         <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-          {/* LiveKit media box */}
+          {/* LiveKit & WebRTC media box */}
           <LiveKitVideoRoom
             meetingId={meeting.id}
             isHost={isHost}
-            participantName={isHost ? meeting.hostName : 'Squad Member'}
+            participantId={myParticipantId}
+            participantName={myParticipantName}
             isMuted={!meeting.isMicActive}
             onToggleMic={onToggleMic}
-            remoteParticipants={meeting.participants.filter((p) => p.name !== meeting.hostName)}
+            remoteParticipants={meeting.participants.filter((p) => p.name !== myParticipantName)}
           />
 
           {/* Participant list with moderation */}
@@ -227,20 +327,26 @@ export const MeetingRoomDrawer = ({
                       {p.name.slice(0, 1)}
                     </div>
                     <div>
-                      <span className="font-semibold text-white block leading-tight">{p.name}</span>
+                      <span className="font-semibold text-white block leading-tight">
+                        {p.name} {p.name === myParticipantName && '(You)'}
+                      </span>
                       <span className="text-[10px] text-slate-400 block">{p.role}</span>
                     </div>
                   </div>
 
                   {/* Actions / Moderation */}
                   <div className="flex items-center gap-1.5">
-                    {isHost && p.name !== meeting.hostName && (
+                    {isHost && p.name !== myParticipantName && (
                       <button
                         onClick={() => onModerationAction(p.id, p.isMuted ? 'unmute' : 'mute')}
                         className="p-1 rounded text-slate-400 hover:text-white transition-colors cursor-pointer"
-                        title={p.isMuted ? 'Unmute' : 'Mute'}
+                        title={p.isMuted ? 'Unmute participant' : 'Mute participant'}
                       >
-                        {p.isMuted ? <MicOff className="w-3 h-3 text-rose-400" /> : <Mic className="w-3 h-3 text-emerald-400" />}
+                        {p.isMuted ? (
+                          <MicOff className="w-3 h-3 text-rose-400" />
+                        ) : (
+                          <Mic className="w-3 h-3 text-emerald-400" />
+                        )}
                       </button>
                     )}
 
@@ -257,38 +363,75 @@ export const MeetingRoomDrawer = ({
         </div>
       )}
 
-      {/* Tab 2: In-Meeting Tactical Chat */}
+      {/* Tab 2: In-Meeting Realtime Tactical Chat */}
       {activeTab === 'chat' && (
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex-1 overflow-y-auto space-y-2 pr-1 mb-2">
-            {messages.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-xs text-slate-500 text-center">
-                No chat messages yet.<br />Send a message to your squad.
+            {isLoadingMessages && messages.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-xs text-slate-500">
+                Loading match chat...
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-xs text-slate-500 text-center p-4">
+                <MessageSquare className="w-8 h-8 text-slate-600 mb-2 stroke-1" />
+                <span className="font-semibold text-slate-400">No tactical messages yet</span>
+                <span className="text-[11px] text-slate-500 mt-0.5">
+                  Send a tactical directive or briefing to your squad.
+                </span>
               </div>
             ) : (
-              messages.map((m) => (
-                <div key={m.id} className="p-2 rounded-xl bg-slate-900/70 border border-slate-800 text-xs">
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 mb-0.5">
-                    <span className="font-semibold text-slate-300">{m.sender_name}</span>
-                    <span>{m.created_at}</span>
+              messages.map((m) => {
+                const isMe = m.sender_name === myParticipantName;
+                const isCoach = m.sender_name === meeting.hostName;
+
+                return (
+                  <div
+                    key={m.id}
+                    className={`p-2.5 rounded-xl border text-xs transition-colors ${
+                      isMe
+                        ? 'bg-slate-900 border-[#a3e635]/30 ml-4'
+                        : isCoach
+                        ? 'bg-[#a3e635]/10 border-[#a3e635]/40 mr-4'
+                        : 'bg-slate-900/70 border-slate-800 mr-4'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`font-semibold ${isMe ? 'text-[#a3e635]' : 'text-slate-200'}`}>
+                          {m.sender_name} {isMe && '(You)'}
+                        </span>
+                        {isCoach && (
+                          <span className="px-1 py-0.2 rounded text-[8px] font-bold bg-[#a3e635]/20 text-[#a3e635] border border-[#a3e635]/40 uppercase">
+                            Coach
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-slate-500 text-[9px]">{m.created_at}</span>
+                    </div>
+                    <p className="text-slate-100 text-xs leading-relaxed break-words">{m.message}</p>
                   </div>
-                  <p className="text-slate-100 text-xs break-words">{m.message}</p>
-                </div>
-              ))
+                );
+              })
             )}
+            <div ref={messagesEndRef} />
           </div>
 
+          {/* Chat input form */}
           <form onSubmit={handleSendMessage} className="flex gap-1.5 pt-2 border-t border-slate-800">
             <input
               type="text"
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
-              placeholder="Tactical instruction or message..."
-              className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-[#a3e635]"
+              placeholder="Tactical directive or match note..."
+              maxLength={500}
+              disabled={isSending}
+              className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-[#a3e635]"
             />
             <button
               type="submit"
-              className="px-3 py-1.5 rounded-lg bg-[#a3e635] text-slate-950 font-bold text-xs hover:bg-[#b4f046] transition-colors cursor-pointer"
+              disabled={!chatInput.trim() || isSending}
+              className="px-3 py-1.5 rounded-lg bg-[#a3e635] text-slate-950 font-bold text-xs hover:bg-[#b4f046] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer flex items-center justify-center shadow-md shadow-[#a3e635]/20"
+              title="Send message (Enter)"
             >
               <Send className="w-3.5 h-3.5" />
             </button>
@@ -305,11 +448,13 @@ export const MeetingRoomDrawer = ({
               value={newNote}
               onChange={(e) => setNewNote(e.target.value)}
               placeholder="Add key match instruction..."
-              className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-[#a3e635]"
+              maxLength={200}
+              className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-[#a3e635]"
             />
             <button
               type="submit"
-              className="px-2.5 py-1.5 rounded-lg bg-[#a3e635] text-slate-950 font-bold text-xs hover:bg-[#b4f046] transition-colors cursor-pointer"
+              disabled={!newNote.trim()}
+              className="px-2.5 py-1.5 rounded-lg bg-[#a3e635] text-slate-950 font-bold text-xs hover:bg-[#b4f046] disabled:opacity-40 transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
             </button>
@@ -325,6 +470,7 @@ export const MeetingRoomDrawer = ({
                 <button
                   onClick={() => handleRemoveNote(idx)}
                   className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-rose-400 p-0.5 transition-opacity cursor-pointer"
+                  title="Remove directive"
                 >
                   <Trash2 className="w-3 h-3" />
                 </button>

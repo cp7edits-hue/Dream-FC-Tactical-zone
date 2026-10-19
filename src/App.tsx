@@ -98,9 +98,14 @@ export default function App() {
     mode: 'create',
   });
 
-  // Active Meeting & Backend Sync State
   const [meeting, setMeeting] = useState<MeetingSession | null>(null);
   const [isHost, setIsHost] = useState(false);
+  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; role: string }>({
+    id: '',
+    name: 'Head Coach',
+    role: 'host',
+  });
+  const [latestChatMessage, setLatestChatMessage] = useState<any>(null);
   const [isMeetingLocked, setIsMeetingLocked] = useState(false);
   const [boardRevision, setBoardRevision] = useState(1);
   const [isMeetingDrawerOpen, setIsMeetingDrawerOpen] = useState(false);
@@ -184,6 +189,22 @@ export default function App() {
           };
         });
         showNotification(`${data.displayName} joined the briefing`);
+      } else if (event === 'chat_message') {
+        setLatestChatMessage(data);
+      } else if (event === 'moderation_event') {
+        if (data.targetId === currentUser.id && data.isMuted !== undefined) {
+          setMeeting((m) => (m ? { ...m, isMicActive: !data.isMuted } : null));
+          showNotification(data.isMuted ? 'You have been muted by the coach' : 'You have been unmuted');
+        }
+        setMeeting((prev) => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            participants: prev.participants.map((p) =>
+              p.id === data.targetId ? { ...p, isMuted: data.isMuted ?? p.isMuted } : p
+            ),
+          };
+        });
       } else if (event === 'meeting_locked') {
         setIsMeetingLocked(data.status === 'locked');
         showNotification(data.status === 'locked' ? 'Meeting has been locked by the coach' : 'Meeting unlocked');
@@ -197,7 +218,7 @@ export default function App() {
     return () => {
       unsubscribe();
     };
-  }, [meeting?.id, boardRevision, currentFormation, isHost]);
+  }, [meeting?.id, boardRevision, currentFormation, isHost, currentUser.id]);
 
   // --- ACTIONS ---
 
@@ -392,6 +413,11 @@ export default function App() {
   const handleMeetingSuccess = (meetingData: any, participantData: any) => {
     const isCallerHost = participantData.role === 'host';
     setIsHost(isCallerHost);
+    setCurrentUser({
+      id: participantData.id,
+      name: participantData.displayName,
+      role: isCallerHost ? 'Head Coach' : participantData.role,
+    });
 
     const session: MeetingSession = {
       id: meetingData.id,
@@ -569,6 +595,7 @@ export default function App() {
           onClose={() => setIsMeetingDrawerOpen(false)}
           meeting={meeting}
           isHost={isHost}
+          currentUser={currentUser}
           boardRevision={boardRevision}
           onUpdateNotes={(notes) => setMeeting({ ...meeting, notes })}
           onToggleMic={() => setMeeting({ ...meeting, isMicActive: !meeting.isMicActive })}
@@ -576,6 +603,7 @@ export default function App() {
           onModerationAction={handleModeration}
           onToggleLock={handleToggleLock}
           isLocked={isMeetingLocked}
+          incomingChatMessage={latestChatMessage}
         />
       )}
 

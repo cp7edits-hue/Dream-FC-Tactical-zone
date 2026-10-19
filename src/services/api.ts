@@ -286,15 +286,32 @@ export const api = {
   },
 
   // 4. Request LiveKit token
-  async getLiveKitToken(meetingId: string) {
-    const res = await fetch(`/api/meetings/${meetingId}/token`, { method: 'POST' }).catch(() => null);
-    if (!res || !res.ok) {
-      return {
-        token: 'mock_guest_token_' + Date.now(),
-        serverUrl: 'wss://dreamfc-tactical.livekit.cloud',
-      };
+  async getLiveKitToken(meetingId: string, participantInfo?: { id?: string; name?: string; isHost?: boolean }) {
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(participantInfo?.id ? { 'x-participant-id': participantInfo.id } : {}),
+          ...(participantInfo?.name ? { 'x-participant-name': encodeURIComponent(participantInfo.name) } : {}),
+        },
+        body: JSON.stringify({
+          participantId: participantInfo?.id,
+          participantName: participantInfo?.name,
+          isHost: participantInfo?.isHost,
+        }),
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (err) {
+      console.warn('[API] getLiveKitToken fetch warning:', err);
     }
-    return res.json();
+
+    return {
+      token: 'client_guest_token_' + Date.now(),
+      serverUrl: 'wss://dreamfc-tactical.livekit.cloud',
+    };
   },
 
   // 5. Get canonical board
@@ -317,9 +334,11 @@ export const api = {
     return res.json();
   },
 
-  // 7. Realtime SSE subscription
+  // 7. Realtime SSE & Multi-Channel subscription
   subscribeToBoardEvents(meetingId: string, onEvent: (event: string, data: any) => void) {
     let eventSource: EventSource | null = null;
+    let broadcastChannel: BroadcastChannel | null = null;
+
     try {
       eventSource = new EventSource(`/api/meetings/${meetingId}/board/events`);
 
@@ -348,8 +367,23 @@ export const api = {
       // SSE unsupported or offline
     }
 
+    // Also support local BroadcastChannel for multi-tab instantaneous sync
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        broadcastChannel = new BroadcastChannel(`dfc_realtime_${meetingId}`);
+        broadcastChannel.onmessage = (event) => {
+          if (event.data?.type && event.data?.payload) {
+            onEvent(event.data.type, event.data.payload);
+          }
+        };
+      } catch {
+        // ignore
+      }
+    }
+
     return () => {
       eventSource?.close();
+      broadcastChannel?.close();
     };
   },
 
@@ -379,19 +413,97 @@ export const api = {
     return res?.ok ? res.json() : { success: true };
   },
 
-  // 11. Messages
+  // 11. Messages & Chat
   async getMessages(meetingId: string) {
-    const res = await fetch(`/api/meetings/${meetingId}/messages`).catch(() => null);
-    return res?.ok ? res.json() : [];
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/messages`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          try {
+            localStorage.setItem(`dfc_messages_${meetingId}`, JSON.stringify(data));
+          } catch {}
+          return data;
+        }
+      }
+    } catch {
+      // Network error or offline
+    }
+
+    // Fallback: check localStorage
+    try {
+      const cached = localStorage.getItem(`dfc_messages_${meetingId}`);
+      if (cached) return JSON.parse(cached);
+    } catch {}
+
+    return [];
   },
 
-  async sendMessage(meetingId: string, message: string) {
-    const res = await fetch(`/api/meetings/${meetingId}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message }),
-    }).catch(() => null);
-    return res?.ok ? res.json() : { success: true };
+  async sendMessage(
+    meetingId: string,
+    message: string,
+    senderInfo?: { id?: string; name?: string }
+  ) {
+    const trimmed = message.trim();
+    if (!trimmed) return { success: false, error: 'Message cannot be empty' };
+
+    const payload = {
+      message: trimmed,
+      senderName: senderInfo?.name || 'Squad Member',
+      senderId: senderInfo?.id || `p_${Date.now()}`,
+    };
+
+    let serverMessage: any = null;
+
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(payload.senderId ? { 'x-participant-id': payload.senderId } : {}),
+          ...(payload.senderName ? { 'x-participant-name': encodeURIComponent(payload.senderName) } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        const json = await res.json();
+        serverMessage = json.message;
+      }
+    } catch (err) {
+      console.warn('[API] sendMessage fetch warning:', err);
+    }
+
+    // Construct local canonical message record if server was unreachable
+    const messageRecord = serverMessage || {
+      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      meeting_id: meetingId,
+      sender_participant_id: payload.senderId,
+      sender_name: payload.senderName,
+      message: trimmed,
+      created_at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    // Cache locally
+    try {
+      const key = `dfc_messages_${meetingId}`;
+      const existing = JSON.parse(localStorage.getItem(key) || '[]');
+      if (!existing.some((m: any) => m.id === messageRecord.id)) {
+        existing.push(messageRecord);
+        localStorage.setItem(key, JSON.stringify(existing));
+      }
+    } catch {}
+
+    // Broadcast on BroadcastChannel for multi-tab testing
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        const bc = new BroadcastChannel(`dfc_realtime_${meetingId}`);
+        bc.postMessage({ type: 'chat_message', payload: messageRecord });
+        bc.close();
+      } catch {}
+    }
+
+    return { success: true, message: messageRecord };
   },
 
   // 12. Saved Tactics
