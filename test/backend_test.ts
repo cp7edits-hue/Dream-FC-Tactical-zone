@@ -1,7 +1,9 @@
 import assert from 'node:assert';
+import http from 'node:http';
 import { generateMeetingCode, generatePasscode, hashPasscode, verifyPasscode } from '../src/server/crypto';
 import { createMeetingSchema, joinMeetingSchema, boardOperationSchema } from '../src/server/validation';
 import { generateLiveKitToken } from '../src/server/livekit';
+import { app } from '../src/server/app';
 
 async function runTests() {
   console.log('--- RUNNING DREAM FC BACKEND VERIFICATION TESTS ---');
@@ -53,6 +55,78 @@ async function runTests() {
   assert(typeof token === 'string' && token.length > 20, 'Token should be a signed JWT');
   assert(typeof serverUrl === 'string', 'Server URL should be present');
   console.log('   ✓ LiveKit token generation passed');
+
+  // Test 5: End-to-end Meeting Creation and Joining via Express App API
+  console.log('5. Testing Express API endpoints (POST /api/meetings and POST /api/meetings/join)...');
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    // 5A: Create Meeting
+    const createRes = await fetch(`${baseUrl}/api/meetings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Tactical Masterclass',
+        hostName: 'Coach Pep',
+        boardPermissionMode: 'coach_only',
+        maxParticipants: 25,
+      }),
+    });
+
+    assert.strictEqual(createRes.status, 201, `Create meeting should return 201, got ${createRes.status}`);
+    const createData = await createRes.json();
+    assert(createData.success === true, 'Response should have success: true');
+    assert(createData.meeting?.code.startsWith('DFC-'), 'Should return a valid DFC- code');
+    assert(createData.meeting?.passcode.startsWith('TACTIC-'), 'Should return a valid TACTIC- passcode');
+    assert.strictEqual(createData.participant?.role, 'host', 'Host should have role host');
+    assert.strictEqual(createData.participant?.canEditBoard, true, 'Host should have canEditBoard: true');
+    console.log(`   ✓ Meeting successfully created: ${createData.meeting.code} (Passcode: ${createData.meeting.passcode})`);
+
+    // 5B: Join Meeting with valid credentials
+    const joinRes = await fetch(`${baseUrl}/api/meetings/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: createData.meeting.code,
+        passcode: createData.meeting.passcode,
+        displayName: 'Erling Haaland',
+        role: 'player',
+      }),
+    });
+
+    assert.strictEqual(joinRes.status, 200, `Join meeting should return 200, got ${joinRes.status}`);
+    const joinData = await joinRes.json();
+    assert(joinData.success === true, 'Join response should have success: true');
+    assert.strictEqual(joinData.participant?.displayName, 'Erling Haaland');
+    assert.strictEqual(joinData.participant?.role, 'player');
+    console.log('   ✓ Player successfully joined the meeting');
+
+    // 5C: Join Meeting with invalid passcode
+    const invalidJoinRes = await fetch(`${baseUrl}/api/meetings/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: createData.meeting.code,
+        passcode: 'TACTIC-0000',
+        displayName: 'Imposter',
+        role: 'player',
+      }),
+    });
+    assert.strictEqual(invalidJoinRes.status, 401, 'Invalid passcode should return 401');
+    console.log('   ✓ Invalid passcode correctly rejected with 401');
+
+    // 5D: Health check endpoint
+    const healthRes = await fetch(`${baseUrl}/api/health`);
+    assert.strictEqual(healthRes.status, 200);
+    const healthData = await healthRes.json();
+    assert.strictEqual(healthData.status, 'ok');
+    console.log('   ✓ API Health check passed');
+  } finally {
+    server.close();
+  }
 
   console.log('----------------------------------------------------');
   console.log('ALL BACKEND VERIFICATION TESTS PASSED SUCCESSFULLY! ✓');

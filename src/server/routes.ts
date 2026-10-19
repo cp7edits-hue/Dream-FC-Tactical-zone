@@ -22,6 +22,7 @@ import { generateLiveKitToken } from './livekit';
 import { store } from './store';
 import { FORMATIONS } from '../constants/formations';
 import { PRESET_DRILLS } from '../constants/drills';
+import { getSupabase } from './supabase';
 
 export const apiRouter = Router();
 
@@ -122,12 +123,63 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
       last_seen_at: new Date().toISOString(),
     };
 
-    // Store records
+    // Store records in memory
     store.meetings.set(meetingId, meetingRecord);
     store.meetingsByCode.set(code, meetingId);
     store.boards.set(meetingId, boardRecord);
     store.participants.set(hostParticipantId, hostParticipant);
     store.messages.set(meetingId, []);
+
+    // Persist to Supabase if configured (asynchronous with safe null foreign keys)
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { error: mErr } = await supabase.from('meetings').insert({
+          id: meetingId,
+          code,
+          title,
+          host_user_id: null, // Allow guest/coach creation without auth.users FK violation
+          team_label: teamLabel,
+          status: 'active',
+          access_secret_hash: accessSecretHash,
+          max_participants: maxParticipants,
+          board_permission_mode: boardPermissionMode,
+          allow_chat: allowChat,
+          lobby_enabled: lobbyEnabled,
+        });
+        if (mErr) {
+          console.warn('[Supabase] Warning on meetings insert:', mErr.message);
+        }
+
+        const { error: bErr } = await supabase.from('tactical_boards').insert({
+          id: boardRecord.id,
+          meeting_id: meetingId,
+          board_state: initialBoardState,
+          revision: 1,
+          updated_by: null,
+        });
+        if (bErr) {
+          console.warn('[Supabase] Warning on tactical_boards insert:', bErr.message);
+        }
+
+        const { error: pErr } = await supabase.from('meeting_participants').insert({
+          id: hostParticipantId,
+          meeting_id: meetingId,
+          authenticated_user_id: null,
+          session_identifier: hostSessionId,
+          display_name: hostName,
+          role: 'host',
+          admission_status: 'admitted',
+          is_muted: false,
+          can_edit_board: true,
+        });
+        if (pErr) {
+          console.warn('[Supabase] Warning on meeting_participants insert:', pErr.message);
+        }
+      } catch (dbErr: any) {
+        console.warn('[Supabase] Persistence warning (in-memory remains authoritative):', dbErr?.message);
+      }
+    }
 
     // Set secure HTTP-only cookie
     res.cookie('dfc_session', hostSessionId, {
@@ -156,7 +208,11 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
       sessionId: hostSessionId,
     });
   } catch (err: any) {
-    res.status(500).json({ error: 'Failed to create meeting' });
+    console.error('[API /meetings] Error during meeting creation:', err);
+    res.status(500).json({
+      error: err?.message || 'Failed to create meeting',
+      details: String(err?.stack || err),
+    });
   }
 });
 
@@ -173,15 +229,41 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
 
     const { code, passcode, displayName, role } = parseResult.data;
 
-    const meetingId = store.meetingsByCode.get(code);
-    if (!meetingId) {
-      res.status(404).json({ error: 'Meeting not found. Please verify meeting code.' });
-      return;
+    let meetingId = store.meetingsByCode.get(code);
+    let meeting = meetingId ? store.meetings.get(meetingId) : null;
+
+    const supabase = getSupabase();
+    if (!meeting && supabase) {
+      try {
+        const { data: dbMeeting } = await supabase
+          .from('meetings')
+          .select('*')
+          .eq('code', code)
+          .maybeSingle();
+
+        if (dbMeeting) {
+          meetingId = dbMeeting.id;
+          meeting = dbMeeting;
+          store.meetings.set(dbMeeting.id, dbMeeting);
+          store.meetingsByCode.set(code, dbMeeting.id);
+
+          const { data: dbBoard } = await supabase
+            .from('tactical_boards')
+            .select('*')
+            .eq('meeting_id', dbMeeting.id)
+            .maybeSingle();
+
+          if (dbBoard) {
+            store.boards.set(dbMeeting.id, dbBoard);
+          }
+        }
+      } catch (dbErr: any) {
+        console.warn('[Supabase] Query warning looking up meeting:', dbErr?.message);
+      }
     }
 
-    const meeting = store.meetings.get(meetingId);
-    if (!meeting) {
-      res.status(404).json({ error: 'Meeting not found' });
+    if (!meeting || !meetingId) {
+      res.status(404).json({ error: 'Meeting not found. Please verify meeting code.' });
       return;
     }
 
@@ -229,6 +311,24 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
 
     store.participants.set(participantId, participant);
 
+    if (supabase) {
+      try {
+        await supabase.from('meeting_participants').insert({
+          id: participantId,
+          meeting_id: meetingId,
+          authenticated_user_id: null,
+          session_identifier: sessionId,
+          display_name: displayName,
+          role: participant.role,
+          admission_status: admissionStatus,
+          is_muted: false,
+          can_edit_board: participant.can_edit_board,
+        });
+      } catch (pErr: any) {
+        console.warn('[Supabase] Warning writing participant:', pErr?.message);
+      }
+    }
+
     // Set cookie
     res.cookie('dfc_session', sessionId, {
       httpOnly: true,
@@ -266,7 +366,8 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
       sessionId,
     });
   } catch (err: any) {
-    res.status(500).json({ error: 'Failed to join meeting' });
+    console.error('[API /meetings/join] Error during join:', err);
+    res.status(500).json({ error: err?.message || 'Failed to join meeting' });
   }
 });
 

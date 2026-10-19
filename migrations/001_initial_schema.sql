@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS public.meetings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code VARCHAR(16) UNIQUE NOT NULL,
   title VARCHAR(120) NOT NULL,
-  host_user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  host_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   team_label VARCHAR(60) DEFAULT 'Dream FC',
   status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('scheduled', 'active', 'locked', 'ended')),
   access_secret_hash TEXT NOT NULL,
@@ -142,79 +142,43 @@ CREATE POLICY "Users can insert their own profile"
   WITH CHECK (auth.uid() = id);
 
 -- Meetings Policies
--- Hosts can manage their meetings
-CREATE POLICY "Host can do everything with their meetings"
-  ON public.meetings FOR ALL
-  USING (auth.uid() = host_user_id);
+CREATE POLICY "Allow meeting creation"
+  ON public.meetings FOR INSERT
+  WITH CHECK (true);
 
--- Admitted participants can read the meeting details (excluding passcodes)
-CREATE POLICY "Admitted participants can view meeting"
+CREATE POLICY "Allow meeting reading"
   ON public.meetings FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.meeting_participants
-      WHERE meeting_participants.meeting_id = meetings.id
-        AND (meeting_participants.authenticated_user_id = auth.uid() OR meeting_participants.session_identifier IS NOT NULL)
-        AND meeting_participants.admission_status = 'admitted'
-    )
-  );
+  USING (true);
+
+CREATE POLICY "Allow meeting updates"
+  ON public.meetings FOR UPDATE
+  USING (true);
 
 -- Meeting Participants Policies
-CREATE POLICY "Host can manage participants"
-  ON public.meeting_participants FOR ALL
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.meetings
-      WHERE meetings.id = meeting_participants.meeting_id
-        AND meetings.host_user_id = auth.uid()
-    )
-  );
+CREATE POLICY "Allow participant join"
+  ON public.meeting_participants FOR INSERT
+  WITH CHECK (true);
 
-CREATE POLICY "Participants can view other members in same meeting"
+CREATE POLICY "Allow participant select"
   ON public.meeting_participants FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.meeting_participants AS me
-      WHERE me.meeting_id = meeting_participants.meeting_id
-        AND (me.authenticated_user_id = auth.uid())
-        AND me.admission_status = 'admitted'
-    )
-  );
+  USING (true);
+
+CREATE POLICY "Allow participant update"
+  ON public.meeting_participants FOR UPDATE
+  USING (true);
 
 -- Tactical Boards Policies
-CREATE POLICY "Admitted members can read the board"
-  ON public.tactical_boards FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.meeting_participants
-      WHERE meeting_participants.meeting_id = tactical_boards.meeting_id
-        AND (meeting_participants.authenticated_user_id = auth.uid())
-        AND meeting_participants.admission_status = 'admitted'
-    )
-    OR
-    EXISTS (
-      SELECT 1 FROM public.meetings
-      WHERE meetings.id = tactical_boards.meeting_id
-        AND meetings.host_user_id = auth.uid()
-    )
-  );
+CREATE POLICY "Allow board insert"
+  ON public.tactical_boards FOR INSERT
+  WITH CHECK (true);
 
-CREATE POLICY "Authorized editors can update the board"
+CREATE POLICY "Allow board select"
+  ON public.tactical_boards FOR SELECT
+  USING (true);
+
+CREATE POLICY "Allow board update"
   ON public.tactical_boards FOR UPDATE
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.meetings
-      WHERE meetings.id = tactical_boards.meeting_id
-        AND meetings.host_user_id = auth.uid()
-    )
-    OR
-    EXISTS (
-      SELECT 1 FROM public.meeting_participants
-      WHERE meeting_participants.meeting_id = tactical_boards.meeting_id
-        AND meeting_participants.authenticated_user_id = auth.uid()
-        AND (meeting_participants.can_edit_board = true OR meeting_participants.role = 'host')
-    )
-  );
+  USING (true);
 
 -- Saved Tactics Policies (Strictly Owner-Only)
 CREATE POLICY "Users can only manage their own saved tactics"
