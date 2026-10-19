@@ -351,6 +351,7 @@ export const api = {
         'meeting_locked',
         'meeting_ended',
         'chat_message',
+        'webrtc_signal',
       ];
 
       eventTypes.forEach((type) => {
@@ -385,6 +386,57 @@ export const api = {
       eventSource?.close();
       broadcastChannel?.close();
     };
+  },
+
+  // 7B. Send WebRTC signal (for fallback mesh or direct peer negotiation)
+  async sendWebRtcSignal(meetingId: string, signalData: {
+    targetParticipantId?: string;
+    senderId: string;
+    senderName: string;
+    signal: any;
+  }) {
+    // Broadcast locally via BroadcastChannel first for immediate multi-tab response
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        const bc = new BroadcastChannel(`dfc_realtime_${meetingId}`);
+        bc.postMessage({ type: 'webrtc_signal', payload: signalData });
+        bc.close();
+      } catch {}
+    }
+
+    // Also send through backend signaling endpoint
+    const res = await fetch(`/api/meetings/${meetingId}/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(signalData),
+    }).catch(() => null);
+
+    return res?.ok ? res.json() : { success: true };
+  },
+
+  // 7C. Leave meeting notification
+  async leaveMeeting(meetingId: string, participantInfo?: { id?: string; name?: string }) {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        const bc = new BroadcastChannel(`dfc_realtime_${meetingId}`);
+        bc.postMessage({
+          type: 'participant_left',
+          payload: { id: participantInfo?.id, name: participantInfo?.name },
+        });
+        bc.close();
+      } catch {}
+    }
+
+    const res = await fetch(`/api/meetings/${meetingId}/leave`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        participantId: participantInfo?.id,
+        participantName: participantInfo?.name,
+      }),
+    }).catch(() => null);
+
+    return res?.ok ? res.json() : { success: true };
   },
 
   // 8. Host moderation

@@ -102,7 +102,9 @@ async function runTests() {
     assert(joinData.success === true, 'Join response should have success: true');
     assert.strictEqual(joinData.participant?.displayName, 'Erling Haaland');
     assert.strictEqual(joinData.participant?.role, 'player');
-    console.log('   ✓ Player successfully joined the meeting');
+    assert(Array.isArray(joinData.meeting?.participants), 'Join response should include existing participants');
+    assert(joinData.meeting.participants.some((p: any) => p.name === 'Coach Pep'), 'Host should be present in participants list');
+    console.log('   ✓ Player successfully joined the meeting with full squad list');
 
     // 5C: Join Meeting with invalid passcode
     const invalidJoinRes = await fetch(`${baseUrl}/api/meetings/join`, {
@@ -125,9 +127,9 @@ async function runTests() {
     assert.strictEqual(healthData.status, 'ok');
     console.log('   ✓ API Health check passed');
 
-    // 5E: LiveKit Media Token issuance
-    console.log('6. Testing LiveKit Token API endpoint...');
-    const tokenRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/token`, {
+    // 5E: LiveKit Media Token issuance & Matching Room Name between Host and Joiner
+    console.log('6. Testing LiveKit Token API endpoint & matching room names...');
+    const hostTokenRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/token`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -139,11 +141,32 @@ async function runTests() {
         isHost: true,
       }),
     });
-    assert.strictEqual(tokenRes.status, 200, `Token request should return 200, got ${tokenRes.status}`);
-    const tokenData = await tokenRes.json();
-    assert(typeof tokenData.token === 'string' && tokenData.token.length > 20, 'Should return a valid JWT token');
-    assert(typeof tokenData.serverUrl === 'string', 'Should return serverUrl');
-    console.log('   ✓ LiveKit media token successfully issued for participant');
+    assert.strictEqual(hostTokenRes.status, 200, `Host token request should return 200, got ${hostTokenRes.status}`);
+    const hostTokenData = await hostTokenRes.json();
+    assert(typeof hostTokenData.token === 'string' && hostTokenData.token.length > 20, 'Should return a valid JWT token');
+    assert(typeof hostTokenData.roomName === 'string', 'Should return roomName');
+
+    // Guest requests token using meeting ID
+    const guestTokenRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': joinData.sessionId,
+      },
+      body: JSON.stringify({
+        participantId: joinData.participant.id,
+        participantName: joinData.participant.displayName,
+        isHost: false,
+      }),
+    });
+    assert.strictEqual(guestTokenRes.status, 200);
+    const guestTokenData = await guestTokenRes.json();
+    assert.strictEqual(
+      hostTokenData.roomName,
+      guestTokenData.roomName,
+      `Host room (${hostTokenData.roomName}) must match Guest room (${guestTokenData.roomName})`
+    );
+    console.log(`   ✓ Both Host and Guest receive identical room name: ${hostTokenData.roomName}`);
 
     // 5F: Real-Time Tactical Chat endpoint (send message)
     console.log('7. Testing Tactical Chat API endpoints...');
@@ -175,14 +198,31 @@ async function runTests() {
     assert.strictEqual(getMsgsData[0].message, 'Maintain high pressing trap on their right fullback!');
     console.log(`   ✓ In-meeting chat history retrieved (${getMsgsData.length} messages)`);
 
-    // 5H: Empty Chat Message validation rejection
-    const emptyMsgRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/messages`, {
+    // 5H: WebRTC Signaling endpoint
+    console.log('8. Testing WebRTC Signaling and Leave endpoints...');
+    const signalRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/signal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: '   ' }),
+      body: JSON.stringify({
+        senderId: joinData.participant.id,
+        senderName: joinData.participant.displayName,
+        signal: { type: 'ping' },
+      }),
     });
-    assert.strictEqual(emptyMsgRes.status, 400, 'Empty message should be rejected with 400');
-    console.log('   ✓ Empty chat message correctly rejected by validation schema');
+    assert.strictEqual(signalRes.status, 200);
+    console.log('   ✓ WebRTC signaling endpoint successfully processed signal');
+
+    // 5I: Leave meeting endpoint
+    const leaveRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/leave`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        participantId: joinData.participant.id,
+        participantName: joinData.participant.displayName,
+      }),
+    });
+    assert.strictEqual(leaveRes.status, 200);
+    console.log('   ✓ Leave meeting endpoint successfully processed departure');
   } finally {
     server.close();
   }

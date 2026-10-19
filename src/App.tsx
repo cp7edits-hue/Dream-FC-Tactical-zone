@@ -171,8 +171,17 @@ export default function App() {
       } else if (event === 'participant_joined') {
         setMeeting((prev) => {
           if (!prev) return null;
-          const exists = prev.participants.some((p) => p.id === data.id);
-          if (exists) return prev;
+          const exists = prev.participants.some((p) => p.id === data.id || p.name === data.displayName);
+          if (exists) {
+            return {
+              ...prev,
+              participants: prev.participants.map((p) =>
+                p.id === data.id || p.name === data.displayName
+                  ? { ...p, role: data.role || p.role, isMuted: data.isMuted ?? p.isMuted }
+                  : p
+              ),
+            };
+          }
           return {
             ...prev,
             participants: [
@@ -183,12 +192,25 @@ export default function App() {
                 role: data.role,
                 isMuted: data.isMuted,
                 isSpeaking: false,
-                avatarColor: 'bg-blue-600 text-white',
+                avatarColor: data.role === 'Head Coach' || data.role === 'host' ? 'bg-[#a3e635] text-slate-950' : 'bg-blue-600 text-white',
               },
             ],
           };
         });
         showNotification(`${data.displayName} joined the briefing`);
+      } else if (event === 'participant_left') {
+        setMeeting((prev) => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            participants: prev.participants.filter(
+              (p) => p.id !== data.id && p.name !== data.name
+            ),
+          };
+        });
+        if (data.name) {
+          showNotification(`${data.name} left the briefing`);
+        }
       } else if (event === 'chat_message') {
         setLatestChatMessage(data);
       } else if (event === 'moderation_event') {
@@ -419,23 +441,39 @@ export default function App() {
       role: isCallerHost ? 'Head Coach' : participantData.role,
     });
 
+    const initialParticipants = Array.isArray(meetingData.participants) && meetingData.participants.length > 0
+      ? meetingData.participants.map((p: any) => ({
+          id: p.id,
+          name: p.name || p.displayName,
+          role: p.role,
+          isMuted: p.isMuted ?? false,
+          isSpeaking: false,
+          avatarColor:
+            p.role === 'Head Coach' || p.role === 'host'
+              ? 'bg-[#a3e635] text-slate-950'
+              : 'bg-blue-600 text-white',
+        }))
+      : [];
+
+    if (!initialParticipants.some((p: any) => p.name === participantData.displayName || p.id === participantData.id)) {
+      initialParticipants.push({
+        id: participantData.id,
+        name: participantData.displayName,
+        role: isCallerHost ? 'Head Coach' : participantData.role,
+        isMuted: false,
+        isSpeaking: false,
+        avatarColor: isCallerHost ? 'bg-[#a3e635] text-slate-950' : 'bg-blue-600 text-white',
+      });
+    }
+
     const session: MeetingSession = {
       id: meetingData.id,
       code: meetingData.code,
       passcode: meetingData.passcode || 'TACTIC-CONFIDENTIAL',
       title: meetingData.title,
-      hostName: isCallerHost ? participantData.displayName : 'Head Coach',
+      hostName: isCallerHost ? participantData.displayName : (meetingData.hostName || 'Head Coach'),
       createdAt: new Date().toLocaleTimeString(),
-      participants: [
-        {
-          id: participantData.id,
-          name: participantData.displayName,
-          role: isCallerHost ? 'Head Coach' : participantData.role,
-          isMuted: false,
-          isSpeaking: true,
-          avatarColor: isCallerHost ? 'bg-[#a3e635] text-slate-950' : 'bg-blue-600 text-white',
-        },
-      ],
+      participants: initialParticipants,
       notes: [
         '1. Maintain compact 4-3-3 shape during opponent build-up',
         '2. Overload right half-space to isolate winger on 1v1',
@@ -473,9 +511,16 @@ export default function App() {
   };
 
   const handleLeaveMeeting = async () => {
-    if (meeting?.id && isHost) {
+    if (meeting?.id) {
       try {
-        await api.endMeeting(meeting.id);
+        if (isHost) {
+          await api.endMeeting(meeting.id);
+        } else {
+          await api.leaveMeeting(meeting.id, {
+            id: currentUser.id,
+            name: currentUser.name,
+          });
+        }
       } catch {}
     }
     setMeeting(null);

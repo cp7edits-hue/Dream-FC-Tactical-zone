@@ -337,6 +337,40 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
       maxAge: 8 * 60 * 60 * 1000,
     });
 
+    // Gather all current participants in the meeting (host + any previously joined members)
+    let existingParticipants = store.getMeetingParticipants(meetingId).map((p) => ({
+      id: p.id,
+      name: p.display_name,
+      role: p.role === 'host' ? 'Head Coach' : p.role,
+      isMuted: p.is_muted,
+      isSpeaking: false,
+      canEditBoard: p.can_edit_board,
+      avatarColor: p.role === 'host' ? 'bg-[#a3e635] text-slate-950' : 'bg-blue-600 text-white',
+    }));
+
+    if (existingParticipants.length <= 1 && supabase) {
+      try {
+        const { data: dbParticipants } = await supabase
+          .from('meeting_participants')
+          .select('*')
+          .eq('meeting_id', meetingId);
+
+        if (dbParticipants && dbParticipants.length > 0) {
+          existingParticipants = dbParticipants.map((p) => ({
+            id: p.id,
+            name: p.display_name,
+            role: p.role === 'host' ? 'Head Coach' : p.role,
+            isMuted: p.is_muted,
+            isSpeaking: false,
+            canEditBoard: p.can_edit_board,
+            avatarColor: p.role === 'host' ? 'bg-[#a3e635] text-slate-950' : 'bg-blue-600 text-white',
+          }));
+        }
+      } catch (e: any) {
+        console.warn('[Supabase] Warning reading participants:', e?.message);
+      }
+    }
+
     // Broadcast participant joined to active room
     store.broadcastToMeeting(meetingId, 'participant_joined', {
       id: participantId,
@@ -355,6 +389,8 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
         status: meeting.status,
         allowChat: meeting.allow_chat,
         boardPermissionMode: meeting.board_permission_mode,
+        hostName: existingParticipants.find((p) => p.role === 'Head Coach')?.name || 'Head Coach',
+        participants: existingParticipants,
       },
       participant: {
         id: participantId,
@@ -374,21 +410,66 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
 // -----------------------------------------------------------------------------
 // 3. GET MEETING DETAILS
 // -----------------------------------------------------------------------------
-apiRouter.get('/meetings/:meetingId', (req: Request, res: Response): void => {
-  const meeting = store.meetings.get(req.params.meetingId);
+apiRouter.get('/meetings/:meetingId', async (req: Request, res: Response): Promise<void> => {
+  const meetingId = req.params.meetingId;
+  let meeting = store.meetings.get(meetingId);
+  if (!meeting) {
+    const foundId = store.meetingsByCode.get(meetingId);
+    if (foundId) {
+      meeting = store.meetings.get(foundId);
+    }
+  }
+
+  const supabase = getSupabase();
+  if (!meeting && supabase) {
+    try {
+      const { data: dbMeeting } = await supabase
+        .from('meetings')
+        .select('*')
+        .or(`id.eq.${meetingId},code.eq.${meetingId}`)
+        .maybeSingle();
+
+      if (dbMeeting) {
+        meeting = dbMeeting;
+        store.meetings.set(dbMeeting.id, dbMeeting);
+        store.meetingsByCode.set(dbMeeting.code, dbMeeting.id);
+      }
+    } catch {}
+  }
+
   if (!meeting) {
     res.status(404).json({ error: 'Meeting not found' });
     return;
   }
 
-  const participants = store.getMeetingParticipants(meeting.id).map((p) => ({
+  let participants = store.getMeetingParticipants(meeting.id).map((p) => ({
     id: p.id,
     name: p.display_name,
-    role: p.role,
+    role: p.role === 'host' ? 'Head Coach' : p.role,
     admissionStatus: p.admission_status,
     isMuted: p.is_muted,
     canEditBoard: p.can_edit_board,
   }));
+
+  if (participants.length === 0 && supabase) {
+    try {
+      const { data: dbParticipants } = await supabase
+        .from('meeting_participants')
+        .select('*')
+        .eq('meeting_id', meeting.id);
+
+      if (dbParticipants) {
+        participants = dbParticipants.map((p) => ({
+          id: p.id,
+          name: p.display_name,
+          role: p.role === 'host' ? 'Head Coach' : p.role,
+          admissionStatus: p.admission_status,
+          isMuted: p.is_muted,
+          canEditBoard: p.can_edit_board,
+        }));
+      }
+    } catch {}
+  }
 
   res.json({
     id: meeting.id,
@@ -397,6 +478,7 @@ apiRouter.get('/meetings/:meetingId', (req: Request, res: Response): void => {
     status: meeting.status,
     boardPermissionMode: meeting.board_permission_mode,
     allowChat: meeting.allow_chat,
+    hostName: participants.find((p) => p.role === 'Head Coach')?.name || 'Head Coach',
     participants,
   });
 });
@@ -435,12 +517,33 @@ apiRouter.post('/meetings/:meetingId/token', async (req: Request, res: Response)
     }
   }
 
+  const supabase = getSupabase();
+  if (!meeting && supabase) {
+    try {
+      const { data: dbMeeting } = await supabase
+        .from('meetings')
+        .select('*')
+        .or(`id.eq.${meetingId},code.eq.${meetingId}`)
+        .maybeSingle();
+
+      if (dbMeeting) {
+        meeting = dbMeeting;
+        store.meetings.set(dbMeeting.id, dbMeeting);
+        store.meetingsByCode.set(dbMeeting.code, dbMeeting.id);
+      }
+    } catch (e: any) {
+      console.warn('[Supabase] Lookup notice for meeting token:', e?.message);
+    }
+  }
+
   if (meeting && meeting.status === 'ended') {
     res.status(410).json({ error: 'Meeting has ended' });
     return;
   }
 
-  const roomName = meeting ? `meeting_${meeting.code}` : `meeting_${meetingId}`;
+  // Ensure deterministic room name: all participants for the same meeting use the exact same room
+  const normalizedCode = meeting?.code ? meeting.code.toUpperCase().trim() : meetingId.toUpperCase().trim();
+  const roomName = `meeting_${normalizedCode}`;
 
   try {
     const { token, serverUrl } = await generateLiveKitToken({
@@ -451,11 +554,48 @@ apiRouter.post('/meetings/:meetingId/token', async (req: Request, res: Response)
       canPublish,
     });
 
-    res.json({ token, serverUrl });
+    res.json({ token, serverUrl, roomName });
   } catch (err: any) {
     console.error('[API /token] Error generating token:', err);
     res.status(500).json({ error: 'Failed to generate media token' });
   }
+});
+
+// -----------------------------------------------------------------------------
+// 4B. WEBRTC SIGNALING ENDPOINT (Fallback mesh media transmission)
+// -----------------------------------------------------------------------------
+apiRouter.post('/meetings/:meetingId/signal', (req: Request, res: Response): void => {
+  const meetingId = req.params.meetingId;
+  const { targetParticipantId, senderId, senderName, signal } = req.body || {};
+
+  store.broadcastToMeeting(meetingId, 'webrtc_signal', {
+    targetParticipantId,
+    senderId,
+    senderName,
+    signal,
+  });
+
+  res.json({ success: true });
+});
+
+// -----------------------------------------------------------------------------
+// 4C. LEAVE MEETING ENDPOINT
+// -----------------------------------------------------------------------------
+apiRouter.post('/meetings/:meetingId/leave', (req: Request, res: Response): void => {
+  const meetingId = req.params.meetingId;
+  const participantId = req.body?.participantId || (req.headers['x-participant-id'] as string);
+  const participantName = req.body?.participantName || 'Squad Member';
+
+  if (participantId) {
+    store.participants.delete(participantId);
+  }
+
+  store.broadcastToMeeting(meetingId, 'participant_left', {
+    id: participantId,
+    name: participantName,
+  });
+
+  res.json({ success: true });
 });
 
 // -----------------------------------------------------------------------------

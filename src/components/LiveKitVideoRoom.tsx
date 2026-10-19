@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, memo } from 'react';
 import {
   Mic,
   MicOff,
@@ -7,20 +7,31 @@ import {
   Radio,
   AlertTriangle,
   RotateCcw,
-  CheckCircle2,
   Volume2,
+  Users,
+  Shield,
 } from 'lucide-react';
 import { api } from '../services/api';
 
-interface RemoteParticipant {
+export interface RemoteParticipant {
   id: string;
   name: string;
   role: string;
   isMuted: boolean;
   isSpeaking?: boolean;
   canEditBoard?: boolean;
-  videoTrack?: any;
-  audioTrack?: any;
+}
+
+interface RemoteFeed {
+  participantId: string;
+  participantName: string;
+  role: string;
+  isHost: boolean;
+  videoTrack: any | null; // LiveKit RemoteTrack or WebRTC MediaStreamTrack
+  audioTrack: any | null; // LiveKit RemoteTrack or WebRTC MediaStreamTrack
+  isVideoMuted: boolean;
+  isAudioMuted: boolean;
+  isSpeaking: boolean;
 }
 
 interface LiveKitVideoRoomProps {
@@ -35,6 +46,162 @@ interface LiveKitVideoRoomProps {
 
 type MediaErrorType = 'permission_denied' | 'not_found' | 'hardware_in_use' | 'unknown' | null;
 
+// =============================================================================
+// INDIVIDUAL REMOTE PARTICIPANT VIDEO TILE
+// =============================================================================
+const RemoteVideoTile = memo(({ feed }: { feed: RemoteFeed }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  // Attach / Detach Video Track
+  useEffect(() => {
+    const videoEl = videoRef.current;
+    if (!videoEl || !feed.videoTrack) return;
+
+    if (typeof feed.videoTrack.attach === 'function') {
+      // LiveKit RemoteTrack
+      try {
+        feed.videoTrack.attach(videoEl);
+        videoEl.play().catch(() => {});
+      } catch (err) {
+        console.warn('[RemoteVideoTile] LiveKit video attach warning:', err);
+      }
+      return () => {
+        try {
+          if (typeof feed.videoTrack.detach === 'function') {
+            feed.videoTrack.detach(videoEl);
+          }
+        } catch {}
+      };
+    } else if (feed.videoTrack instanceof MediaStreamTrack) {
+      // Native WebRTC MediaStreamTrack
+      videoEl.srcObject = new MediaStream([feed.videoTrack]);
+      videoEl.play().catch(() => {});
+      return () => {
+        videoEl.srcObject = null;
+      };
+    }
+  }, [feed.videoTrack]);
+
+  // Attach / Detach Audio Track
+  useEffect(() => {
+    const audioEl = audioRef.current;
+    if (!audioEl || !feed.audioTrack) return;
+
+    if (typeof feed.audioTrack.attach === 'function') {
+      // LiveKit RemoteTrack
+      try {
+        feed.audioTrack.attach(audioEl);
+        audioEl.play().catch(() => {});
+      } catch (err) {
+        console.warn('[RemoteVideoTile] LiveKit audio attach warning:', err);
+      }
+      return () => {
+        try {
+          if (typeof feed.audioTrack.detach === 'function') {
+            feed.audioTrack.detach(audioEl);
+          }
+        } catch {}
+      };
+    } else if (feed.audioTrack instanceof MediaStreamTrack) {
+      // Native WebRTC MediaStreamTrack
+      audioEl.srcObject = new MediaStream([feed.audioTrack]);
+      audioEl.play().catch(() => {});
+      return () => {
+        audioEl.srcObject = null;
+      };
+    }
+  }, [feed.audioTrack]);
+
+  const hasActiveVideo = !!feed.videoTrack && !feed.isVideoMuted;
+
+  return (
+    <div
+      className={`relative aspect-video rounded-xl bg-slate-900 border overflow-hidden flex items-center justify-center shadow-lg transition-all ${
+        feed.isSpeaking
+          ? 'border-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.35)] ring-1 ring-emerald-400/50'
+          : 'border-slate-800'
+      }`}
+    >
+      {/* Remote Video Element */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        className={`w-full h-full object-cover transition-opacity duration-300 ${
+          hasActiveVideo ? 'opacity-100' : 'opacity-0 hidden'
+        }`}
+      />
+
+      {/* Remote Audio Element (Hidden) */}
+      <audio ref={audioRef} autoPlay playsInline />
+
+      {/* Fallback Tactical Avatar when camera is disabled or track absent */}
+      {!hasActiveVideo && (
+        <div className="w-full h-full bg-gradient-to-tr from-slate-950 via-slate-900 to-slate-800 flex flex-col items-center justify-center p-2 text-center animate-fade-in">
+          <div
+            className={`w-10 h-10 rounded-full flex items-center justify-center font-display font-black text-sm mb-1 transition-transform shadow-inner ${
+              feed.isSpeaking
+                ? 'scale-110 bg-emerald-500/25 border-2 border-emerald-400 text-emerald-400'
+                : feed.isHost
+                ? 'bg-[#a3e635]/20 border border-[#a3e635]/50 text-[#a3e635]'
+                : 'bg-blue-600/20 border border-blue-500/40 text-blue-400'
+            }`}
+          >
+            {feed.participantName.slice(0, 1).toUpperCase()}
+          </div>
+
+          <span className="text-xs font-semibold text-slate-200 truncate max-w-full px-1">
+            {feed.participantName}
+          </span>
+
+          <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
+            <VideoOff className="w-3 h-3 text-slate-500" />
+            <span>Camera Off</span>
+          </span>
+        </div>
+      )}
+
+      {/* Real-time speaking banner */}
+      {feed.isSpeaking && (
+        <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/60 text-emerald-300 text-[9px] font-bold uppercase tracking-wider flex items-center gap-1 animate-pulse">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+          <span>Speaking</span>
+        </div>
+      )}
+
+      {/* Bottom participant details badge */}
+      <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center justify-between text-[10px] bg-slate-950/85 px-2 py-0.5 rounded-md backdrop-blur-sm border border-slate-800/60">
+        <span className="truncate max-w-[85px] text-slate-300 font-medium flex items-center gap-1">
+          {feed.isHost ? (
+            <span className="text-[#a3e635] font-bold flex items-center gap-0.5">
+              <Shield className="w-2.5 h-2.5" />
+              Coach
+            </span>
+          ) : (
+            feed.participantName
+          )}
+        </span>
+        <div className="flex items-center gap-1">
+          {feed.isAudioMuted ? (
+            <span className="text-rose-400 flex items-center gap-0.5">
+              <MicOff className="w-3 h-3" />
+            </span>
+          ) : (
+            <span className="text-emerald-400 flex items-center gap-0.5">
+              <Mic className="w-3 h-3" />
+              {feed.isSpeaking && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+// =============================================================================
+// MAIN LIVEKIT & WEBRTC VIDEO ROOM COMPONENT
+// =============================================================================
 export const LiveKitVideoRoom = ({
   meetingId,
   isHost,
@@ -50,17 +217,28 @@ export const LiveKitVideoRoom = ({
   >('requesting_permissions');
   const [mediaError, setMediaError] = useState<MediaErrorType>(null);
   const [isSpeakingLocally, setIsSpeakingLocally] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(0); // 0 to 100
+  const [, setAudioLevel] = useState(0);
 
-  // Track and Stream references
+  // Dynamic remote feeds map: key = participantId or identity
+  const [remoteFeeds, setRemoteFeeds] = useState<Map<string, RemoteFeed>>(new Map());
+
+  // Hardware references
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+
+  // LiveKit room reference
   const livekitRoomRef = useRef<any>(null);
 
-  // Stop local media tracks
+  // Native WebRTC peer connections map: peerId -> RTCPeerConnection
+  const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+
+  // Deterministic local participant identity
+  const myIdentity = participantId || `p_${participantName.replace(/\s+/g, '_')}`;
+
+  // Stop local hardware tracks and audio analyser
   const stopLocalTracks = useCallback(() => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -85,11 +263,149 @@ export const LiveKitVideoRoom = ({
     }
   }, []);
 
+  // Cleanup WebRTC peer connections
+  const cleanupPeerConnections = useCallback(() => {
+    peerConnectionsRef.current.forEach((pc) => {
+      try {
+        pc.close();
+      } catch {}
+    });
+    peerConnectionsRef.current.clear();
+  }, []);
+
+  // Sync incoming remoteParticipants prop with remoteFeeds state
+  useEffect(() => {
+    setRemoteFeeds((prev) => {
+      const next = new Map(prev);
+      remoteParticipants.forEach((p) => {
+        const existing = next.get(p.id) || next.get(p.name);
+        if (existing) {
+          next.set(existing.participantId, {
+            ...existing,
+            participantName: p.name,
+            role: p.role,
+            isHost: p.role === 'Head Coach' || p.role === 'host',
+            isAudioMuted: p.isMuted ?? existing.isAudioMuted,
+          });
+        } else {
+          // Initialize placeholder feed until tracks are connected
+          next.set(p.id, {
+            participantId: p.id,
+            participantName: p.name,
+            role: p.role,
+            isHost: p.role === 'Head Coach' || p.role === 'host',
+            videoTrack: null,
+            audioTrack: null,
+            isVideoMuted: true,
+            isAudioMuted: p.isMuted ?? false,
+            isSpeaking: false,
+          });
+        }
+      });
+
+      // Remove participants that left the meeting
+      for (const [id] of next.entries()) {
+        const stillInMeeting = remoteParticipants.some((p) => p.id === id || p.name === id);
+        if (!stillInMeeting) {
+          next.delete(id);
+        }
+      }
+
+      return next;
+    });
+  }, [remoteParticipants]);
+
+  // Setup WebRTC peer-to-peer connection for fallback mesh
+  const setupWebRtcPeerConnection = useCallback(
+    async (remotePeerId: string, remotePeerName: string, isInitiator: boolean) => {
+      if (peerConnectionsRef.current.has(remotePeerId)) return;
+
+      try {
+        const pc = new RTCPeerConnection({
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' },
+          ],
+        });
+
+        peerConnectionsRef.current.set(remotePeerId, pc);
+
+        // Add local tracks to peer connection
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach((track) => {
+            pc.addTrack(track, localStreamRef.current!);
+          });
+        }
+
+        // Handle incoming remote media tracks
+        pc.ontrack = (event) => {
+          const [remoteStream] = event.streams;
+          const track = event.track;
+
+          setRemoteFeeds((prev) => {
+            const next = new Map(prev);
+            const current = next.get(remotePeerId) || {
+              participantId: remotePeerId,
+              participantName: remotePeerName,
+              role: 'Squad Member',
+              isHost: false,
+              videoTrack: null,
+              audioTrack: null,
+              isVideoMuted: false,
+              isAudioMuted: false,
+              isSpeaking: false,
+            };
+
+            if (track.kind === 'video') {
+              current.videoTrack = track;
+              current.isVideoMuted = !track.enabled;
+            } else if (track.kind === 'audio') {
+              current.audioTrack = track;
+              current.isAudioMuted = !track.enabled;
+            }
+
+            next.set(remotePeerId, { ...current });
+            return next;
+          });
+        };
+
+        // Send ICE candidates to remote peer
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            api.sendWebRtcSignal(meetingId, {
+              targetParticipantId: remotePeerId,
+              senderId: myIdentity,
+              senderName: participantName,
+              signal: { type: 'candidate', candidate: event.candidate },
+            }).catch(() => {});
+          }
+        };
+
+        // If initiator, create offer
+        if (isInitiator) {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          await api.sendWebRtcSignal(meetingId, {
+            targetParticipantId: remotePeerId,
+            senderId: myIdentity,
+            senderName: participantName,
+            signal: { type: 'offer', sdp: offer },
+          });
+        }
+      } catch (err) {
+        console.warn('[LiveKitVideoRoom] WebRTC peer setup error:', err);
+      }
+    },
+    [meetingId, myIdentity, participantName]
+  );
+
   // Initialize hardware media & LiveKit room
   const initMedia = useCallback(async () => {
     setConnectionStatus('requesting_permissions');
     setMediaError(null);
     stopLocalTracks();
+    cleanupPeerConnections();
 
     let stream: MediaStream | null = null;
 
@@ -97,7 +413,6 @@ export const LiveKitVideoRoom = ({
     try {
       if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
         try {
-          // Attempt audio + video with optimal lightweight dimensions for tactical side-drawer
           stream = await navigator.mediaDevices.getUserMedia({
             audio: {
               echoCancellation: true,
@@ -111,7 +426,6 @@ export const LiveKitVideoRoom = ({
             },
           });
         } catch (videoError: any) {
-          // If video failed (e.g. no camera attached), attempt audio only
           console.warn('[LiveKitVideoRoom] Camera acquisition failed, falling back to audio-only:', videoError);
           try {
             stream = await navigator.mediaDevices.getUserMedia({
@@ -162,7 +476,7 @@ export const LiveKitVideoRoom = ({
         localVideoRef.current.play().catch(() => {});
       }
 
-      // Setup Web Audio Analyser for accurate local speaking detection
+      // Setup Web Audio Analyser for accurate speaking detection
       try {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioContextClass && audioTracks.length > 0) {
@@ -189,7 +503,6 @@ export const LiveKitVideoRoom = ({
             const normalized = Math.min(100, Math.round((average / 128) * 100));
             setAudioLevel(normalized);
 
-            // Speaking threshold: volume > 10 and not muted
             const activeAudio = audioTracks.some((t) => t.enabled);
             setIsSpeakingLocally(activeAudio && average > 12);
 
@@ -205,35 +518,186 @@ export const LiveKitVideoRoom = ({
       setConnectionStatus('connected_webrtc');
     }
 
-    // 2. Attempt LiveKit Cloud connection if configured
+    // 2. Connect to LiveKit Cloud Room
     try {
       const { token, serverUrl } = await api.getLiveKitToken(meetingId, {
-        id: participantId,
+        id: myIdentity,
         name: participantName,
         isHost,
       });
 
-      const isLiveKitCloud =
+      const isLiveKitConfigured =
         serverUrl &&
-        !serverUrl.includes('dev.livekit.cloud') &&
-        !serverUrl.includes('YOUR_LIVEKIT_PROJECT') &&
         serverUrl.startsWith('wss://') &&
+        !serverUrl.includes('YOUR_LIVEKIT_PROJECT') &&
         token &&
         token.length > 30;
 
-      if (isLiveKitCloud) {
+      if (isLiveKitConfigured) {
         try {
-          const { Room, RoomEvent } = await import('livekit-client');
+          const { Room, RoomEvent, Track } = await import('livekit-client');
           const room = new Room({
             adaptiveStream: true,
             dynacast: true,
           });
           livekitRoomRef.current = room;
 
+          // Helper to register / update a participant's feed from LiveKit
+          const updateParticipantFeed = (p: any) => {
+            const pid = p.identity || p.sid;
+            const pname = p.name || p.identity || 'Squad Member';
+            const isCoach = p.metadata?.includes('host') || pname.toLowerCase().includes('coach');
+
+            // Find video & audio tracks
+            let vTrack: any = null;
+            let aTrack: any = null;
+            let isVMuted = true;
+            let isAMuted = true;
+
+            p.trackPublications?.forEach((pub: any) => {
+              if (pub.kind === Track.Kind.Video || pub.source === Track.Source.Camera) {
+                vTrack = pub.track || null;
+                isVMuted = pub.isMuted || !pub.track;
+              } else if (pub.kind === Track.Kind.Audio || pub.source === Track.Source.Microphone) {
+                aTrack = pub.track || null;
+                isAMuted = pub.isMuted;
+              }
+            });
+
+            setRemoteFeeds((prev) => {
+              const next = new Map(prev);
+              const existing = next.get(pid);
+              next.set(pid, {
+                participantId: pid,
+                participantName: pname,
+                role: isCoach ? 'Head Coach' : existing?.role || 'Squad Member',
+                isHost: isCoach,
+                videoTrack: vTrack || existing?.videoTrack || null,
+                audioTrack: aTrack || existing?.audioTrack || null,
+                isVideoMuted: vTrack ? isVMuted : existing?.isVideoMuted ?? true,
+                isAudioMuted: aTrack ? isAMuted : existing?.isAudioMuted ?? false,
+                isSpeaking: p.isSpeaking ?? false,
+              });
+              return next;
+            });
+          };
+
+          // Register LiveKit Room Events
+          room.on(RoomEvent.ParticipantConnected, (participant: any) => {
+            console.log('[LiveKit] Participant connected:', participant.identity);
+            updateParticipantFeed(participant);
+          });
+
+          room.on(RoomEvent.ParticipantDisconnected, (participant: any) => {
+            console.log('[LiveKit] Participant disconnected:', participant.identity);
+            const pid = participant.identity || participant.sid;
+            setRemoteFeeds((prev) => {
+              const next = new Map(prev);
+              next.delete(pid);
+              return next;
+            });
+          });
+
+          room.on(RoomEvent.TrackSubscribed, (track: any, publication: any, participant: any) => {
+            console.log('[LiveKit] Track subscribed:', track.kind, 'from', participant.identity);
+            const pid = participant.identity || participant.sid;
+            setRemoteFeeds((prev) => {
+              const next = new Map(prev);
+              const current = next.get(pid) || {
+                participantId: pid,
+                participantName: participant.name || 'Squad Member',
+                role: 'Squad Member',
+                isHost: false,
+                videoTrack: null,
+                audioTrack: null,
+                isVideoMuted: true,
+                isAudioMuted: false,
+                isSpeaking: false,
+              };
+
+              if (track.kind === Track.Kind.Video) {
+                current.videoTrack = track;
+                current.isVideoMuted = publication.isMuted;
+              } else if (track.kind === Track.Kind.Audio) {
+                current.audioTrack = track;
+                current.isAudioMuted = publication.isMuted;
+              }
+
+              next.set(pid, { ...current });
+              return next;
+            });
+          });
+
+          room.on(RoomEvent.TrackUnsubscribed, (track: any, publication: any, participant: any) => {
+            console.log('[LiveKit] Track unsubscribed:', track.kind, 'from', participant.identity);
+            const pid = participant.identity || participant.sid;
+            setRemoteFeeds((prev) => {
+              const next = new Map(prev);
+              const current = next.get(pid);
+              if (current) {
+                if (track.kind === Track.Kind.Video) current.videoTrack = null;
+                if (track.kind === Track.Kind.Audio) current.audioTrack = null;
+                next.set(pid, { ...current });
+              }
+              return next;
+            });
+          });
+
+          room.on(RoomEvent.TrackMuted, (publication: any, participant: any) => {
+            const pid = participant.identity || participant.sid;
+            setRemoteFeeds((prev) => {
+              const next = new Map(prev);
+              const current = next.get(pid);
+              if (current) {
+                if (publication.kind === Track.Kind.Video) current.isVideoMuted = true;
+                if (publication.kind === Track.Kind.Audio) current.isAudioMuted = true;
+                next.set(pid, { ...current });
+              }
+              return next;
+            });
+          });
+
+          room.on(RoomEvent.TrackUnmuted, (publication: any, participant: any) => {
+            const pid = participant.identity || participant.sid;
+            setRemoteFeeds((prev) => {
+              const next = new Map(prev);
+              const current = next.get(pid);
+              if (current) {
+                if (publication.kind === Track.Kind.Video) current.isVideoMuted = false;
+                if (publication.kind === Track.Kind.Audio) current.isAudioMuted = false;
+                next.set(pid, { ...current });
+              }
+              return next;
+            });
+          });
+
+          room.on(RoomEvent.ActiveSpeakersChanged, (speakers: any[]) => {
+            const activeSpeakerIds = new Set(speakers.map((s) => s.identity || s.sid));
+            setRemoteFeeds((prev) => {
+              let changed = false;
+              const next = new Map(prev);
+              for (const [id, feed] of next.entries()) {
+                const speaking = activeSpeakerIds.has(id);
+                if (feed.isSpeaking !== speaking) {
+                  next.set(id, { ...feed, isSpeaking: speaking });
+                  changed = true;
+                }
+              }
+              return changed ? next : prev;
+            });
+          });
+
+          room.on(RoomEvent.ConnectionStateChanged, (state: string) => {
+            if (state === 'reconnecting') setConnectionStatus('reconnecting');
+            if (state === 'connected') setConnectionStatus('connected_livekit');
+            if (state === 'disconnected') setConnectionStatus('connected_webrtc');
+          });
+
+          // Connect to room
           await room.connect(serverUrl, token);
           setConnectionStatus('connected_livekit');
 
-          // Publish tracks if stream exists
+          // Publish local tracks
           if (stream) {
             const videoTrack = stream.getVideoTracks()[0];
             const audioTrack = stream.getAudioTracks()[0];
@@ -241,34 +705,34 @@ export const LiveKitVideoRoom = ({
             if (audioTrack) await room.localParticipant.publishTrack(audioTrack);
           }
 
-          room.on(RoomEvent.ConnectionStateChanged, (state: string) => {
-            if (state === 'reconnecting') setConnectionStatus('reconnecting');
-            if (state === 'connected') setConnectionStatus('connected_livekit');
-            if (state === 'disconnected') setConnectionStatus('connected_webrtc');
+          // Ingest any participants already present in the room
+          room.remoteParticipants.forEach((p: any) => {
+            updateParticipantFeed(p);
           });
         } catch (lkConnectErr) {
-          console.warn('[LiveKitVideoRoom] LiveKit Cloud server unreachable, using native WebRTC engine:', lkConnectErr);
+          console.warn('[LiveKitVideoRoom] LiveKit Cloud connect failed, activating WebRTC mesh:', lkConnectErr);
           setConnectionStatus(stream ? 'connected_webrtc' : 'disconnected');
         }
       }
     } catch (tokenErr) {
-      console.warn('[LiveKitVideoRoom] Token acquisition notice:', tokenErr);
+      console.warn('[LiveKitVideoRoom] Media token notice:', tokenErr);
       if (stream) setConnectionStatus('connected_webrtc');
     }
-  }, [meetingId, participantId, participantName, isHost, stopLocalTracks]);
+  }, [meetingId, myIdentity, participantName, isHost, stopLocalTracks, cleanupPeerConnections, isMuted, isVideoEnabled]);
 
-  // Run init on mount and cleanup on unmount
+  // Run initialization on mount & cleanup on unmount
   useEffect(() => {
     initMedia();
     return () => {
       stopLocalTracks();
+      cleanupPeerConnections();
       if (livekitRoomRef.current) {
         try {
           livekitRoomRef.current.disconnect();
         } catch {}
       }
     };
-  }, [initMedia, stopLocalTracks]);
+  }, [initMedia, stopLocalTracks, cleanupPeerConnections]);
 
   // Synchronize mic mute state with physical hardware audio track
   useEffect(() => {
@@ -316,6 +780,9 @@ export const LiveKitVideoRoom = ({
     setIsVideoEnabled((prev) => !prev);
   };
 
+  // Convert remoteFeeds map to array for rendering
+  const remoteFeedList = Array.from(remoteFeeds.values());
+
   return (
     <div className="flex flex-col gap-2">
       {/* Header status bar */}
@@ -328,7 +795,7 @@ export const LiveKitVideoRoom = ({
                 : 'text-amber-400'
             }`}
           />
-          <span className="text-white font-bold">Tactical Media Comms</span>
+          <span className="text-white font-bold">Tactical Comms</span>
         </span>
 
         <span
@@ -382,13 +849,23 @@ export const LiveKitVideoRoom = ({
         </div>
       )}
 
-      {/* Grid of video / voice tiles */}
-      <div className="grid grid-cols-2 gap-2">
+      {/* Dynamic Grid of video tiles (Local + Remote Participants) */}
+      <div
+        className={`grid gap-2 ${
+          remoteFeedList.length === 0
+            ? 'grid-cols-2'
+            : remoteFeedList.length === 1
+            ? 'grid-cols-2'
+            : remoteFeedList.length <= 3
+            ? 'grid-cols-2'
+            : 'grid-cols-2'
+        }`}
+      >
         {/* Local user tile */}
         <div
           className={`relative aspect-video rounded-xl bg-slate-900 border overflow-hidden flex items-center justify-center shadow-lg transition-all ${
             isSpeakingLocally
-              ? 'border-[#a3e635] shadow-[0_0_12px_rgba(163,230,53,0.35)]'
+              ? 'border-[#a3e635] shadow-[0_0_12px_rgba(163,230,53,0.35)] ring-1 ring-[#a3e635]/50'
               : 'border-slate-800'
           }`}
         >
@@ -405,7 +882,7 @@ export const LiveKitVideoRoom = ({
 
           {/* Tactical Avatar Fallback when Camera is disabled or error */}
           {(!isVideoEnabled || mediaError) && (
-            <div className="w-full h-full bg-gradient-to-tr from-slate-950 via-slate-900 to-slate-800 flex flex-col items-center justify-center p-2 text-center">
+            <div className="w-full h-full bg-gradient-to-tr from-slate-950 via-slate-900 to-slate-800 flex flex-col items-center justify-center p-2 text-center animate-fade-in">
               <div
                 className={`w-10 h-10 rounded-full flex items-center justify-center font-display font-black text-sm shadow-inner mb-1 transition-transform ${
                   isSpeakingLocally
@@ -418,7 +895,7 @@ export const LiveKitVideoRoom = ({
                 {participantName.slice(0, 1).toUpperCase()}
               </div>
 
-              <span className="text-xs font-semibold text-white truncate max-w-full">
+              <span className="text-xs font-semibold text-white truncate max-w-full px-1">
                 {participantName} (You)
               </span>
 
@@ -429,7 +906,7 @@ export const LiveKitVideoRoom = ({
             </div>
           )}
 
-          {/* Realtime speaking audio indicator bar */}
+          {/* Realtime speaking audio indicator badge */}
           {isSpeakingLocally && (
             <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/60 text-emerald-300 text-[9px] font-bold uppercase tracking-wider flex items-center gap-1 animate-pulse">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
@@ -439,7 +916,7 @@ export const LiveKitVideoRoom = ({
 
           {/* Bottom badge */}
           <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center justify-between text-[10px] bg-slate-950/85 px-2 py-0.5 rounded-md backdrop-blur-sm border border-slate-800/60">
-            <span className="truncate max-w-[80px] text-slate-300 font-medium">
+            <span className="truncate max-w-[85px] text-slate-300 font-medium">
               {isHost ? 'Coach (You)' : `${participantName} (You)`}
             </span>
             <div className="flex items-center gap-1">
@@ -451,9 +928,7 @@ export const LiveKitVideoRoom = ({
               ) : (
                 <span className="text-emerald-400 flex items-center gap-0.5">
                   <Mic className="w-3 h-3" />
-                  {isSpeakingLocally && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  )}
+                  {isSpeakingLocally && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />}
                 </span>
               )}
             </div>
@@ -461,50 +936,15 @@ export const LiveKitVideoRoom = ({
         </div>
 
         {/* Remote participant tiles */}
-        {remoteParticipants.length === 0 ? (
+        {remoteFeedList.length === 0 ? (
           <div className="relative aspect-video rounded-xl bg-slate-900/40 border border-dashed border-slate-800 flex flex-col items-center justify-center p-2 text-center text-slate-500">
-            <Radio className="w-5 h-5 mb-1 text-slate-600" />
+            <Users className="w-5 h-5 mb-1 text-slate-600" />
             <span className="text-[11px] font-medium text-slate-400">Waiting for Squad</span>
             <span className="text-[9px] text-slate-500">Share meeting code to invite</span>
           </div>
         ) : (
-          remoteParticipants.slice(0, 3).map((p) => (
-            <div
-              key={p.id}
-              className={`relative aspect-video rounded-xl bg-slate-900 border overflow-hidden flex items-center justify-center shadow-lg transition-all ${
-                p.isSpeaking
-                  ? 'border-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
-                  : 'border-slate-800'
-              }`}
-            >
-              <div className="w-full h-full bg-gradient-to-tr from-slate-950 via-slate-900 to-slate-800 flex flex-col items-center justify-center p-2 text-center">
-                <div
-                  className={`w-10 h-10 rounded-full flex items-center justify-center font-display font-black text-sm mb-1 transition-transform ${
-                    p.isSpeaking
-                      ? 'scale-110 bg-emerald-500/20 border-2 border-emerald-400 text-emerald-400'
-                      : 'bg-blue-600/20 border border-blue-500/40 text-blue-400'
-                  }`}
-                >
-                  {p.name.slice(0, 1).toUpperCase()}
-                </div>
-                <span className="text-xs font-semibold text-slate-200 truncate max-w-full">
-                  {p.name}
-                </span>
-                <span className="text-[9px] text-slate-400">{p.role}</span>
-              </div>
-
-              {/* Bottom badge */}
-              <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center justify-between text-[10px] bg-slate-950/85 px-2 py-0.5 rounded-md backdrop-blur-sm border border-slate-800/60">
-                <span className="truncate max-w-[70px] text-slate-400">{p.role}</span>
-                <div className="flex items-center gap-1">
-                  {p.isMuted ? (
-                    <MicOff className="w-3 h-3 text-rose-400" />
-                  ) : (
-                    <Mic className="w-3 h-3 text-emerald-400" />
-                  )}
-                </div>
-              </div>
-            </div>
+          remoteFeedList.map((feed) => (
+            <RemoteVideoTile key={feed.participantId} feed={feed} />
           ))
         )}
       </div>
