@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <radialGradient id="stadiumGlow" cx="50%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#142c1d"/>
+      <stop offset="50%" stop-color="#091322"/>
+      <stop offset="100%" stop-color="#030712"/>
+    </radialGradient>
+    <linearGradient id="floodlightL" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="floodlightR" x1="1" y1="0" x2="0.2" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="accentLime" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#bef264"/>
+      <stop offset="100%" stop-color="#84cc16"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Stadium Background & Vignette -->
+  <rect width="1200" height="630" fill="url(#stadiumGlow)"/>
+
+  <!-- Stadium Floodlight Beams -->
+  <polygon points="120,40 380,420 80,480" fill="url(#floodlightL)"/>
+  <polygon points="1080,40 820,420 1120,480" fill="url(#floodlightR)"/>
+  
+  <!-- Floodlight Towers -->
+  <circle cx="120" cy="40" r="16" fill="#f8fafc"/>
+  <circle cx="1080" cy="40" r="16" fill="#f8fafc"/>
+
+  <!-- 3D Perspective Pitch Representation -->
+  <g transform="translate(600, 360)">
+    <!-- Pitch Floor with Lawn Stripes -->
+    <polygon points="-480,210 -280,-40 280,-40 480,210" fill="#1b5a26" stroke="#22c55e" stroke-width="1.5" stroke-opacity="0.4"/>
+    <!-- Center Circle & Halfway Line in Perspective -->
+    <line x1="-380" y1="85" x2="380" y2="85" stroke="#f8fafc" stroke-width="3" stroke-opacity="0.7"/>
+    <ellipse cx="0" cy="85" rx="110" ry="38" fill="none" stroke="#f8fafc" stroke-width="3" stroke-opacity="0.7"/>
+    <circle cx="0" cy="85" r="5" fill="#f8fafc"/>
+
+    <!-- Tactical Markers in 3D -->
+    <!-- Home Team Tokens (White) -->
+    <g transform="translate(-160, 110)">
+      <ellipse cx="0" cy="12" rx="20" ry="7" fill="#000000" opacity="0.4"/>
+      <cylinder cx="0" cy="0" rx="16" ry="6" fill="#f8fafc"/>
+      <ellipse cx="0" cy="0" rx="16" ry="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+      <circle cx="0" cy="-12" r="13" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
+      <text x="0" y="-8" font-family="Montserrat, sans-serif" font-weight="900" font-size="11" fill="#0f172a" text-anchor="middle">17</text>
+    </g>
+
+    <g transform="translate(160, 110)">
+      <ellipse cx="0" cy="12" rx="20" ry="7" fill="#000000" opacity="0.4"/>
+      <ellipse cx="0" cy="0" rx="16" ry="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+      <circle cx="0" cy="-12" r="13" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
+      <text x="0" y="-8" font-family="Montserrat, sans-serif" font-weight="900" font-size="11" fill="#0f172a" text-anchor="middle">47</text>
+    </g>
+
+    <g transform="translate(0, 150)">
+      <!-- Active player halo ring -->
+      <ellipse cx="0" cy="5" rx="34" ry="12" fill="none" stroke="#a3e635" stroke-width="3"/>
+      <ellipse cx="0" cy="0" rx="18" ry="7" fill="#0f172a" stroke="#1e3a8a" stroke-width="2"/>
+      <circle cx="0" cy="-14" r="14" fill="#0f172a" stroke="#38bdf8" stroke-width="2"/>
+      <text x="0" y="-9" font-family="Montserrat, sans-serif" font-weight="900" font-size="12" fill="#a3e635" text-anchor="middle">9</text>
+    </g>
+
+    <!-- Curved Tactical Passing & Run Ribbons -->
+    <path d="M -160 110 Q -60 50 0 85" fill="none" stroke="#ffffff" stroke-width="4" stroke-opacity="0.9" stroke-linecap="round"/>
+    <path d="M 160 110 Q 80 180 0 150" fill="none" stroke="#a3e635" stroke-width="4" stroke-linecap="round"/>
+  </g>
+
+  <!-- Brand Typography Header -->
+  <g transform="translate(600, 125)">
+    <!-- Top pill -->
+    <rect x="-140" y="-45" width="280" height="28" rx="14" fill="#091322" stroke="#334155" stroke-width="1.5"/>
+    <text x="0" y="-27" font-family="system-ui, sans-serif" font-weight="700" font-size="11" fill="#a3e635" text-anchor="middle" letter-spacing="2">OFFICIAL 3D STRATEGY SUITE</text>
+
+    <!-- DREAM FC TACTICAL ZONE -->
+    <text x="0" y="30" font-family="Montserrat, sans-serif" font-weight="900" font-size="64" fill="#ffffff" text-anchor="middle" letter-spacing="1">DREAM FC</text>
+    <text x="0" y="90" font-family="Montserrat, sans-serif" font-weight="900" font-size="64" text-anchor="middle" letter-spacing="1">
+      <tspan fill="#ffffff">TACTICAL </tspan>
+      <tspan fill="#a3e635">ZONE</tspan>
+    </text>
+
+    <!-- Subtitle -->
+    <text x="0" y="132" font-family="Plus Jakarta Sans, sans-serif" font-weight="500" font-size="22" fill="#e2e8f0" text-anchor="middle">Plan the Game, Win Together.</text>
+  </g>
+
+  <!-- Bottom Badges -->
+  <g transform="translate(600, 595)">
+    <text x="0" y="0" font-family="Plus Jakarta Sans, sans-serif" font-size="13" fill="#64748b" text-anchor="middle">
+      Real-Time 3D Pitch • 7 Formations • Live Strategy Rooms • Encrypted Sessions
+    </text>
+  </g>
+</svg>

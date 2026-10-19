@@ -1,0 +1,13 @@
+# robots.txt for Dream FC Tactical Zone
+# https://dreamfc.zone/
+
+User-agent: *
+Allow: /
+Allow: /favicon.svg
+Allow: /og-image.svg
+
+# Protect private meetings, video rooms, and server API routes from crawler indexing
+Disallow: /api/
+Disallow: /meetings/
+
+Sitemap: https://dreamfc.zone/sitemap.xml

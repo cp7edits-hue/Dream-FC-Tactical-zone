@@ -1,0 +1,6 @@
+{
+  "name": "Dream FC Tactical Zone",
+  "description": "Interactive 3D football tactics board and collaborative strategy room. Plan formations, set passing paths, and win together.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
