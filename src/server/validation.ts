@@ -11,14 +11,28 @@ export const createMeetingSchema = z.object({
 });
 
 export const joinMeetingSchema = z.object({
-  code: z.string().trim().toUpperCase().regex(/^[A-Z0-9-]{4,64}$/, 'Invalid meeting code or ID format'),
-  passcode: z.string().trim().min(4, 'Passcode must be at least 4 characters').max(64),
+  code: z.string().trim().min(3, 'Meeting code or ID must be at least 3 characters').max(64),
+  passcode: z.string().trim().min(3, 'Passcode must be at least 3 characters').max(64),
   displayName: z.string().trim().min(2, 'Display name must be at least 2 characters').max(60),
   role: z.enum(['player', 'collaborator', 'analyst']).optional().default('player'),
 });
 
 export const boardOperationSchema = z.object({
-  type: z.enum(['move_player', 'move_ball', 'set_formation', 'add_path', 'clear_paths', 'reset_board']),
+  type: z.enum([
+    'move_player',
+    'move_ball',
+    'set_formation',
+    'add_path',
+    'set_paths',
+    'reorder_paths',
+    'delete_path',
+    'clear_paths',
+    'reset_board',
+    'simulate_play',
+    'simulate_pause',
+    'simulate_resume',
+    'simulate_reset',
+  ]),
   payload: z.record(z.string(), z.any()),
   clientRevision: z.number().int().nonnegative().optional(),
 });

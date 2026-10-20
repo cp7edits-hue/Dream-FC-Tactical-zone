@@ -8,7 +8,21 @@ export async function hashPasscode(passcode: string): Promise<string> {
 
 export async function verifyPasscode(passcode: string, hash: string): Promise<boolean> {
   try {
-    return await bcrypt.compare(passcode, hash);
+    const raw = (passcode || '').trim();
+    if (!raw) return false;
+    // 1. Direct match
+    if (await bcrypt.compare(raw, hash)) return true;
+    // 2. Uppercase match
+    if (await bcrypt.compare(raw.toUpperCase(), hash)) return true;
+    // 3. Normalized TACTIC- prefix match
+    if (!raw.toUpperCase().startsWith('TACTIC-')) {
+      if (await bcrypt.compare(`TACTIC-${raw.toUpperCase()}`, hash)) return true;
+    } else {
+      // Stripped TACTIC- prefix match
+      const stripped = raw.replace(/^TACTIC-/i, '').trim();
+      if (stripped && (await bcrypt.compare(stripped, hash))) return true;
+    }
+    return false;
   } catch {
     return false;
   }

@@ -36,6 +36,22 @@ export interface TacticalPath {
   points: PlayerPosition[]; // starting and ending or control points
   color?: string;
   label?: string;
+  order?: number; // 1, 2, 3...
+  fromPlayerId?: string; // origin player
+  fromPlayerName?: string;
+  toPlayerId?: string; // receiving player
+  toPlayerName?: string;
+  duration?: number; // seconds
+  status?: 'pending' | 'active' | 'completed';
+}
+
+export type SimulationStatus = 'idle' | 'playing' | 'paused' | 'completed';
+
+export interface SimulationState {
+  status: SimulationStatus;
+  currentPassIndex: number;
+  totalPasses: number;
+  speed: number;
 }
 
 export type CameraPreset = 'broadcast' | 'overhead' | 'attacking' | 'defending' | 'free';

@@ -90,7 +90,7 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
         position: { x: -p.x, z: -p.z },
       })),
       ball: { x: 0, z: 0 },
-      paths: PRESET_DRILLS[0].paths,
+      paths: [],
       notes: [
         '1. Maintain compact 4-3-3 shape during opponent build-up',
         '2. Overload right half-space to isolate winger',
@@ -228,24 +228,74 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
       return;
     }
 
-    const { code, passcode, displayName, role } = parseResult.data;
+    const { code: inputCode, passcode, displayName, role } = parseResult.data;
 
-    // Check memory store (supports lookup by squad code or canonical meeting UUID)
-    let meetingId = store.meetingsByCode.get(code) || (store.meetings.has(code) ? code : null);
-    if (!meetingId) {
-      store.syncFromDisk();
-      meetingId = store.meetingsByCode.get(code) || (store.meetings.has(code) ? code : null);
+    // Normalize code: strip extra spaces/dashes, extract uppercase code
+    const rawTrimmed = inputCode.trim();
+    const upperTrimmed = rawTrimmed.toUpperCase().replace(/\s+/g, '');
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawTrimmed);
+    const normalizedUuid = isUuid ? rawTrimmed.toLowerCase() : null;
+
+    // Build candidate codes (e.g. user typed "HRZX" -> check "HRZX" & "DFC-HRZX", or user typed "DFC-HRZX" -> check both)
+    const codeCandidates: string[] = [upperTrimmed];
+    if (upperTrimmed.startsWith('DFC-')) {
+      codeCandidates.push(upperTrimmed.replace(/^DFC-/, ''));
+    } else if (/^[A-Z0-9]{4}$/.test(upperTrimmed)) {
+      codeCandidates.push(`DFC-${upperTrimmed}`);
     }
-    let meeting = meetingId ? store.meetings.get(meetingId) : null;
 
+    // 1. Check in-memory store
+    let meetingId: string | null = null;
+    let meeting: any = null;
+
+    const findInMemory = () => {
+      // Direct lookup by candidate code
+      for (const cand of codeCandidates) {
+        if (store.meetingsByCode.has(cand)) {
+          meetingId = store.meetingsByCode.get(cand)!;
+          meeting = store.meetings.get(meetingId);
+          if (meeting) return true;
+        }
+      }
+      // Direct lookup by UUID
+      if (normalizedUuid && store.meetings.has(normalizedUuid)) {
+        meetingId = normalizedUuid;
+        meeting = store.meetings.get(normalizedUuid);
+        if (meeting) return true;
+      }
+      // Scan all stored meetings
+      for (const m of store.meetings.values()) {
+        const mCode = m.code ? m.code.toUpperCase() : '';
+        if (
+          codeCandidates.includes(mCode) ||
+          codeCandidates.some((c) => mCode.endsWith(c) || c.endsWith(mCode)) ||
+          (normalizedUuid && m.id.toLowerCase() === normalizedUuid)
+        ) {
+          meetingId = m.id;
+          meeting = m;
+          return true;
+        }
+      }
+      return false;
+    };
+
+    if (!findInMemory()) {
+      store.syncFromDisk();
+      findInMemory();
+    }
+
+    // 2. Query Supabase safely (prevent PostgreSQL uuid casting errors on DFC- strings)
     const supabase = getSupabase();
     if (!meeting && supabase) {
       try {
-        const { data: dbMeeting } = await supabase
-          .from('meetings')
-          .select('*')
-          .or(`code.eq.${code},id.eq.${code}`)
-          .maybeSingle();
+        let query = supabase.from('meetings').select('*');
+        if (normalizedUuid) {
+          query = query.eq('id', normalizedUuid);
+        } else {
+          const primaryCode = codeCandidates.find((c) => c.startsWith('DFC-')) || upperTrimmed;
+          query = query.eq('code', primaryCode);
+        }
+        const { data: dbMeeting } = await query.maybeSingle();
 
         if (dbMeeting) {
           meetingId = dbMeeting.id;
@@ -270,7 +320,7 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
     }
 
     if (!meeting || !meetingId) {
-      res.status(404).json({ error: 'Meeting not found. Please verify meeting code.' });
+      res.status(404).json({ error: 'Meeting not found. Please verify the squad code or meeting ID.' });
       return;
     }
 
@@ -528,11 +578,14 @@ apiRouter.post('/meetings/:meetingId/token', async (req: Request, res: Response)
   const supabase = getSupabase();
   if (!meeting && supabase) {
     try {
-      const { data: dbMeeting } = await supabase
-        .from('meetings')
-        .select('*')
-        .or(`id.eq.${meetingId},code.eq.${meetingId}`)
-        .maybeSingle();
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(meetingId);
+      let query = supabase.from('meetings').select('*');
+      if (isUuid) {
+        query = query.eq('id', meetingId.toLowerCase());
+      } else {
+        query = query.eq('code', meetingId.toUpperCase());
+      }
+      const { data: dbMeeting } = await query.maybeSingle();
 
       if (dbMeeting) {
         meeting = dbMeeting;
@@ -709,9 +762,28 @@ apiRouter.post('/meetings/:meetingId/board/operations', (req: Request, res: Resp
   } else if (type === 'add_path') {
     if (!board.board_state.paths) board.board_state.paths = [];
     board.board_state.paths.push(typedPayload.path);
+  } else if (type === 'set_paths') {
+    board.board_state.paths = Array.isArray(typedPayload.paths) ? typedPayload.paths : [];
+  } else if (type === 'reorder_paths') {
+    if (Array.isArray(typedPayload.paths)) {
+      board.board_state.paths = typedPayload.paths;
+    }
+  } else if (type === 'delete_path') {
+    if (board.board_state.paths && typedPayload.pathId) {
+      board.board_state.paths = board.board_state.paths.filter((p: any) => p.id !== typedPayload.pathId);
+    }
   } else if (type === 'clear_paths') {
     board.board_state.paths = [];
   } else if (type === 'reset_board') {
+    if (typedPayload.boardState) {
+      board.board_state = typedPayload.boardState;
+    }
+  } else if (
+    type === 'simulate_play' ||
+    type === 'simulate_pause' ||
+    type === 'simulate_resume' ||
+    type === 'simulate_reset'
+  ) {
     if (typedPayload.boardState) {
       board.board_state = typedPayload.boardState;
     }
