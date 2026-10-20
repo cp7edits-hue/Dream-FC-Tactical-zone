@@ -7,6 +7,11 @@ import {
   SavedTacticRecord,
 } from '../types/database';
 
+import fs from 'node:fs';
+import path from 'node:path';
+
+const DFC_STORE_FILE = path.join(process.platform === 'win32' ? process.cwd() : '/tmp', 'dfc_meetings_store.json');
+
 export class MeetingStore {
   public meetings = new Map<string, MeetingRecord>(); // key: id
   public meetingsByCode = new Map<string, string>(); // code -> id
@@ -15,6 +20,46 @@ export class MeetingStore {
   public messages = new Map<string, MeetingMessageRecord[]>(); // key: meeting_id
   public savedTactics = new Map<string, SavedTacticRecord[]>(); // key: owner_user_id
   public deletionRequests = new Map<string, { email: string; date: string; reason?: string }>();
+
+  constructor() {
+    this.syncFromDisk();
+  }
+
+  public syncFromDisk() {
+    try {
+      if (fs.existsSync(DFC_STORE_FILE)) {
+        const raw = fs.readFileSync(DFC_STORE_FILE, 'utf-8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.meetings)) {
+          data.meetings.forEach((m: MeetingRecord) => {
+            this.meetings.set(m.id, m);
+            this.meetingsByCode.set(m.code, m.id);
+          });
+        }
+        if (Array.isArray(data.boards)) {
+          data.boards.forEach((b: TacticalBoardRecord) => {
+            this.boards.set(b.meeting_id, b);
+          });
+        }
+        if (Array.isArray(data.participants)) {
+          data.participants.forEach((p: MeetingParticipantRecord) => {
+            this.participants.set(p.id, p);
+          });
+        }
+      }
+    } catch {}
+  }
+
+  public syncToDisk() {
+    try {
+      const payload = {
+        meetings: Array.from(this.meetings.values()),
+        boards: Array.from(this.boards.values()),
+        participants: Array.from(this.participants.values()),
+      };
+      fs.writeFileSync(DFC_STORE_FILE, JSON.stringify(payload), 'utf-8');
+    } catch {}
+  }
 
   // SSE client connections: meeting_id -> Set<Response>
   private sseClients = new Map<string, Set<Response>>();

@@ -10,6 +10,7 @@ import {
   Volume2,
   Users,
   Shield,
+  Maximize2,
 } from 'lucide-react';
 import { api } from '../services/api';
 
@@ -22,7 +23,7 @@ export interface RemoteParticipant {
   canEditBoard?: boolean;
 }
 
-interface RemoteFeed {
+export interface RemoteFeed {
   participantId: string;
   participantName: string;
   role: string;
@@ -41,163 +42,212 @@ interface LiveKitVideoRoomProps {
   participantName: string;
   isMuted: boolean;
   onToggleMic: () => void;
+  isVideoEnabled?: boolean;
+  onToggleVideo?: () => void;
   remoteParticipants: RemoteParticipant[];
+  isDrawerOpen?: boolean;
+  onExpandDrawer?: () => void;
 }
 
 type MediaErrorType = 'permission_denied' | 'not_found' | 'hardware_in_use' | 'unknown' | null;
 
 // =============================================================================
-// INDIVIDUAL REMOTE PARTICIPANT VIDEO TILE
+// INDIVIDUAL REMOTE PARTICIPANT VIDEO TILE (FULL & COMPACT)
 // =============================================================================
-const RemoteVideoTile = memo(({ feed }: { feed: RemoteFeed }) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
+const RemoteVideoTile = memo(
+  ({
+    feed,
+    compact = false,
+    onClick,
+  }: {
+    feed: RemoteFeed;
+    compact?: boolean;
+    onClick?: () => void;
+  }) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const audioRef = useRef<HTMLAudioElement>(null);
 
-  // Attach / Detach Video Track
-  useEffect(() => {
-    const videoEl = videoRef.current;
-    if (!videoEl || !feed.videoTrack) return;
+    // Attach / Detach Video Track
+    useEffect(() => {
+      const videoEl = videoRef.current;
+      if (!videoEl || !feed.videoTrack) return;
 
-    if (typeof feed.videoTrack.attach === 'function') {
-      // LiveKit RemoteTrack
-      try {
-        feed.videoTrack.attach(videoEl);
+      if (typeof feed.videoTrack.attach === 'function') {
+        try {
+          feed.videoTrack.attach(videoEl);
+          videoEl.play().catch(() => {});
+        } catch (err) {
+          console.warn('[RemoteVideoTile] Video attach notice:', err);
+        }
+        return () => {
+          try {
+            if (typeof feed.videoTrack.detach === 'function') {
+              feed.videoTrack.detach(videoEl);
+            }
+          } catch {}
+        };
+      } else if (feed.videoTrack instanceof MediaStreamTrack) {
+        videoEl.srcObject = new MediaStream([feed.videoTrack]);
         videoEl.play().catch(() => {});
-      } catch (err) {
-        console.warn('[RemoteVideoTile] LiveKit video attach warning:', err);
+        return () => {
+          videoEl.srcObject = null;
+        };
       }
-      return () => {
+    }, [feed.videoTrack]);
+
+    // Attach / Detach Audio Track (Always mounted to ensure audio is heard!)
+    useEffect(() => {
+      const audioEl = audioRef.current;
+      if (!audioEl || !feed.audioTrack) return;
+
+      if (typeof feed.audioTrack.attach === 'function') {
         try {
-          if (typeof feed.videoTrack.detach === 'function') {
-            feed.videoTrack.detach(videoEl);
-          }
-        } catch {}
-      };
-    } else if (feed.videoTrack instanceof MediaStreamTrack) {
-      // Native WebRTC MediaStreamTrack
-      videoEl.srcObject = new MediaStream([feed.videoTrack]);
-      videoEl.play().catch(() => {});
-      return () => {
-        videoEl.srcObject = null;
-      };
-    }
-  }, [feed.videoTrack]);
-
-  // Attach / Detach Audio Track
-  useEffect(() => {
-    const audioEl = audioRef.current;
-    if (!audioEl || !feed.audioTrack) return;
-
-    if (typeof feed.audioTrack.attach === 'function') {
-      // LiveKit RemoteTrack
-      try {
-        feed.audioTrack.attach(audioEl);
+          feed.audioTrack.attach(audioEl);
+          audioEl.play().catch(() => {});
+        } catch (err) {
+          console.warn('[RemoteVideoTile] Audio attach notice:', err);
+        }
+        return () => {
+          try {
+            if (typeof feed.audioTrack.detach === 'function') {
+              feed.audioTrack.detach(audioEl);
+            }
+          } catch {}
+        };
+      } else if (feed.audioTrack instanceof MediaStreamTrack) {
+        audioEl.srcObject = new MediaStream([feed.audioTrack]);
         audioEl.play().catch(() => {});
-      } catch (err) {
-        console.warn('[RemoteVideoTile] LiveKit audio attach warning:', err);
+        return () => {
+          audioEl.srcObject = null;
+        };
       }
-      return () => {
-        try {
-          if (typeof feed.audioTrack.detach === 'function') {
-            feed.audioTrack.detach(audioEl);
-          }
-        } catch {}
-      };
-    } else if (feed.audioTrack instanceof MediaStreamTrack) {
-      // Native WebRTC MediaStreamTrack
-      audioEl.srcObject = new MediaStream([feed.audioTrack]);
-      audioEl.play().catch(() => {});
-      return () => {
-        audioEl.srcObject = null;
-      };
-    }
-  }, [feed.audioTrack]);
+    }, [feed.audioTrack]);
 
-  const hasActiveVideo = !!feed.videoTrack && !feed.isVideoMuted;
+    const hasActiveVideo = !!feed.videoTrack && !feed.isVideoMuted;
 
-  return (
-    <div
-      className={`relative aspect-video rounded-xl bg-slate-900 border overflow-hidden flex items-center justify-center shadow-lg transition-all ${
-        feed.isSpeaking
-          ? 'border-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.35)] ring-1 ring-emerald-400/50'
-          : 'border-slate-800'
-      }`}
-    >
-      {/* Remote Video Element */}
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        className={`w-full h-full object-cover transition-opacity duration-300 ${
-          hasActiveVideo ? 'opacity-100' : 'opacity-0 hidden'
-        }`}
-      />
+    // Compact Thumbnail Mode (For minimized top meeting bar)
+    if (compact) {
+      return (
+        <div
+          onClick={onClick}
+          className={`relative w-12 h-9 sm:w-16 sm:h-11 rounded-lg bg-slate-900 border overflow-hidden flex items-center justify-center shrink-0 shadow cursor-pointer transition-all hover:scale-105 ${
+            feed.isSpeaking
+              ? 'border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] ring-1 ring-emerald-400'
+              : 'border-slate-800 hover:border-slate-700'
+          }`}
+          title={`${feed.participantName} (${feed.isHost ? 'Coach' : 'Squad'}) - Click to expand`}
+        >
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            className={`w-full h-full object-cover ${hasActiveVideo ? 'opacity-100' : 'opacity-0 hidden'}`}
+          />
+          <audio ref={audioRef} autoPlay playsInline />
 
-      {/* Remote Audio Element (Hidden) */}
-      <audio ref={audioRef} autoPlay playsInline />
+          {!hasActiveVideo && (
+            <div className="w-full h-full bg-slate-950 flex flex-col items-center justify-center text-center p-0.5">
+              <span
+                className={`text-[10px] font-bold ${feed.isHost ? 'text-[#a3e635]' : 'text-blue-400'}`}
+              >
+                {feed.participantName.slice(0, 1).toUpperCase()}
+              </span>
+            </div>
+          )}
 
-      {/* Fallback Tactical Avatar when camera is disabled or track absent */}
-      {!hasActiveVideo && (
-        <div className="w-full h-full bg-gradient-to-tr from-slate-950 via-slate-900 to-slate-800 flex flex-col items-center justify-center p-2 text-center animate-fade-in">
-          <div
-            className={`w-10 h-10 rounded-full flex items-center justify-center font-display font-black text-sm mb-1 transition-transform shadow-inner ${
-              feed.isSpeaking
-                ? 'scale-110 bg-emerald-500/25 border-2 border-emerald-400 text-emerald-400'
-                : feed.isHost
-                ? 'bg-[#a3e635]/20 border border-[#a3e635]/50 text-[#a3e635]'
-                : 'bg-blue-600/20 border border-blue-500/40 text-blue-400'
-            }`}
-          >
-            {feed.participantName.slice(0, 1).toUpperCase()}
+          <div className="absolute bottom-0 inset-x-0 bg-slate-950/85 px-1 py-0.5 flex items-center justify-between text-[8px] leading-none text-slate-300">
+            <span className="truncate max-w-[28px] sm:max-w-[36px]">
+              {feed.isHost ? 'Coach' : feed.participantName}
+            </span>
+            {feed.isAudioMuted ? (
+              <MicOff className="w-2 h-2 text-rose-400" />
+            ) : (
+              <Mic className="w-2 h-2 text-emerald-400" />
+            )}
           </div>
-
-          <span className="text-xs font-semibold text-slate-200 truncate max-w-full px-1">
-            {feed.participantName}
-          </span>
-
-          <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
-            <VideoOff className="w-3 h-3 text-slate-500" />
-            <span>Camera Off</span>
-          </span>
         </div>
-      )}
+      );
+    }
 
-      {/* Real-time speaking banner */}
-      {feed.isSpeaking && (
-        <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/60 text-emerald-300 text-[9px] font-bold uppercase tracking-wider flex items-center gap-1 animate-pulse">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          <span>Speaking</span>
-        </div>
-      )}
+    // Full Grid Tile Mode
+    return (
+      <div
+        className={`relative aspect-video rounded-xl bg-slate-900 border overflow-hidden flex items-center justify-center shadow-lg transition-all ${
+          feed.isSpeaking
+            ? 'border-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.35)] ring-1 ring-emerald-400/50'
+            : 'border-slate-800'
+        }`}
+      >
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          className={`w-full h-full object-cover transition-opacity duration-300 ${
+            hasActiveVideo ? 'opacity-100' : 'opacity-0 hidden'
+          }`}
+        />
+        <audio ref={audioRef} autoPlay playsInline />
 
-      {/* Bottom participant details badge */}
-      <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center justify-between text-[10px] bg-slate-950/85 px-2 py-0.5 rounded-md backdrop-blur-sm border border-slate-800/60">
-        <span className="truncate max-w-[85px] text-slate-300 font-medium flex items-center gap-1">
-          {feed.isHost ? (
-            <span className="text-[#a3e635] font-bold flex items-center gap-0.5">
-              <Shield className="w-2.5 h-2.5" />
-              Coach
+        {!hasActiveVideo && (
+          <div className="w-full h-full bg-gradient-to-tr from-slate-950 via-slate-900 to-slate-800 flex flex-col items-center justify-center p-2 text-center animate-fade-in">
+            <div
+              className={`w-10 h-10 rounded-full flex items-center justify-center font-display font-black text-sm mb-1 transition-transform shadow-inner ${
+                feed.isSpeaking
+                  ? 'scale-110 bg-emerald-500/25 border-2 border-emerald-400 text-emerald-400'
+                  : feed.isHost
+                  ? 'bg-[#a3e635]/20 border border-[#a3e635]/50 text-[#a3e635]'
+                  : 'bg-blue-600/20 border border-blue-500/40 text-blue-400'
+              }`}
+            >
+              {feed.participantName.slice(0, 1).toUpperCase()}
+            </div>
+
+            <span className="text-xs font-semibold text-slate-200 truncate max-w-full px-1">
+              {feed.participantName}
             </span>
-          ) : (
-            feed.participantName
-          )}
-        </span>
-        <div className="flex items-center gap-1">
-          {feed.isAudioMuted ? (
-            <span className="text-rose-400 flex items-center gap-0.5">
-              <MicOff className="w-3 h-3" />
+
+            <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
+              <VideoOff className="w-3 h-3 text-slate-500" />
+              <span>Camera Off</span>
             </span>
-          ) : (
-            <span className="text-emerald-400 flex items-center gap-0.5">
-              <Mic className="w-3 h-3" />
-              {feed.isSpeaking && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />}
-            </span>
-          )}
+          </div>
+        )}
+
+        {feed.isSpeaking && (
+          <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/60 text-emerald-300 text-[9px] font-bold uppercase tracking-wider flex items-center gap-1 animate-pulse">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span>Speaking</span>
+          </div>
+        )}
+
+        <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center justify-between text-[10px] bg-slate-950/85 px-2 py-0.5 rounded-md backdrop-blur-sm border border-slate-800/60">
+          <span className="truncate max-w-[85px] text-slate-300 font-medium flex items-center gap-1">
+            {feed.isHost ? (
+              <span className="text-[#a3e635] font-bold flex items-center gap-0.5">
+                <Shield className="w-2.5 h-2.5" />
+                Coach
+              </span>
+            ) : (
+              feed.participantName
+            )}
+          </span>
+          <div className="flex items-center gap-1">
+            {feed.isAudioMuted ? (
+              <span className="text-rose-400 flex items-center gap-0.5">
+                <MicOff className="w-3 h-3" />
+              </span>
+            ) : (
+              <span className="text-emerald-400 flex items-center gap-0.5">
+                <Mic className="w-3 h-3" />
+                {feed.isSpeaking && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />}
+              </span>
+            )}
+          </div>
         </div>
       </div>
-    </div>
-  );
-});
+    );
+  }
+);
 
 // =============================================================================
 // MAIN LIVEKIT & WEBRTC VIDEO ROOM COMPONENT
@@ -209,9 +259,15 @@ export const LiveKitVideoRoom = ({
   participantName,
   isMuted,
   onToggleMic,
+  isVideoEnabled: externalVideoEnabled,
+  onToggleVideo: externalToggleVideo,
   remoteParticipants,
+  isDrawerOpen = true,
+  onExpandDrawer,
 }: LiveKitVideoRoomProps) => {
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+  const [internalVideoEnabled, setInternalVideoEnabled] = useState(true);
+  const isVideoEnabled = externalVideoEnabled !== undefined ? externalVideoEnabled : internalVideoEnabled;
+
   const [connectionStatus, setConnectionStatus] = useState<
     'requesting_permissions' | 'connected_livekit' | 'connected_webrtc' | 'reconnecting' | 'disconnected'
   >('requesting_permissions');
@@ -224,6 +280,7 @@ export const LiveKitVideoRoom = ({
 
   // Hardware references
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const localMiniVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -235,7 +292,6 @@ export const LiveKitVideoRoom = ({
   // Native WebRTC peer connections map: peerId -> RTCPeerConnection
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
 
-  // Deterministic local participant identity
   const myIdentity = participantId || `p_${participantName.replace(/\s+/g, '_')}`;
 
   // Stop local hardware tracks and audio analyser
@@ -260,6 +316,9 @@ export const LiveKitVideoRoom = ({
     }
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = null;
+    }
+    if (localMiniVideoRef.current) {
+      localMiniVideoRef.current.srcObject = null;
     }
   }, []);
 
@@ -288,7 +347,6 @@ export const LiveKitVideoRoom = ({
             isAudioMuted: p.isMuted ?? existing.isAudioMuted,
           });
         } else {
-          // Initialize placeholder feed until tracks are connected
           next.set(p.id, {
             participantId: p.id,
             participantName: p.name,
@@ -303,7 +361,6 @@ export const LiveKitVideoRoom = ({
         }
       });
 
-      // Remove participants that left the meeting
       for (const [id] of next.entries()) {
         const stillInMeeting = remoteParticipants.some((p) => p.id === id || p.name === id);
         if (!stillInMeeting) {
@@ -331,18 +388,14 @@ export const LiveKitVideoRoom = ({
 
         peerConnectionsRef.current.set(remotePeerId, pc);
 
-        // Add local tracks to peer connection
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((track) => {
             pc.addTrack(track, localStreamRef.current!);
           });
         }
 
-        // Handle incoming remote media tracks
         pc.ontrack = (event) => {
-          const [remoteStream] = event.streams;
           const track = event.track;
-
           setRemoteFeeds((prev) => {
             const next = new Map(prev);
             const current = next.get(remotePeerId) || {
@@ -370,7 +423,6 @@ export const LiveKitVideoRoom = ({
           });
         };
 
-        // Send ICE candidates to remote peer
         pc.onicecandidate = (event) => {
           if (event.candidate) {
             api.sendWebRtcSignal(meetingId, {
@@ -382,7 +434,6 @@ export const LiveKitVideoRoom = ({
           }
         };
 
-        // If initiator, create offer
         if (isInitiator) {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
@@ -435,7 +486,11 @@ export const LiveKitVideoRoom = ({
                 autoGainControl: true,
               },
             });
-            setIsVideoEnabled(false);
+            if (externalToggleVideo) {
+              // keep external in sync
+            } else {
+              setInternalVideoEnabled(false);
+            }
           } catch (audioError: any) {
             throw audioError;
           }
@@ -455,17 +510,14 @@ export const LiveKitVideoRoom = ({
       setConnectionStatus('disconnected');
     }
 
-    // Attach stream to local video element and start audio analyser
     if (stream) {
       localStreamRef.current = stream;
 
-      // Apply initial mute state
       const audioTracks = stream.getAudioTracks();
       audioTracks.forEach((t) => {
         t.enabled = !isMuted;
       });
 
-      // Apply initial video state
       const videoTracks = stream.getVideoTracks();
       videoTracks.forEach((t) => {
         t.enabled = isVideoEnabled;
@@ -475,8 +527,11 @@ export const LiveKitVideoRoom = ({
         localVideoRef.current.srcObject = stream;
         localVideoRef.current.play().catch(() => {});
       }
+      if (localMiniVideoRef.current && videoTracks.length > 0) {
+        localMiniVideoRef.current.srcObject = stream;
+        localMiniVideoRef.current.play().catch(() => {});
+      }
 
-      // Setup Web Audio Analyser for accurate speaking detection
       try {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioContextClass && audioTracks.length > 0) {
@@ -542,13 +597,11 @@ export const LiveKitVideoRoom = ({
           });
           livekitRoomRef.current = room;
 
-          // Helper to register / update a participant's feed from LiveKit
           const updateParticipantFeed = (p: any) => {
             const pid = p.identity || p.sid;
             const pname = p.name || p.identity || 'Squad Member';
             const isCoach = p.metadata?.includes('host') || pname.toLowerCase().includes('coach');
 
-            // Find video & audio tracks
             let vTrack: any = null;
             let aTrack: any = null;
             let isVMuted = true;
@@ -582,14 +635,11 @@ export const LiveKitVideoRoom = ({
             });
           };
 
-          // Register LiveKit Room Events
           room.on(RoomEvent.ParticipantConnected, (participant: any) => {
-            console.log('[LiveKit] Participant connected:', participant.identity);
             updateParticipantFeed(participant);
           });
 
           room.on(RoomEvent.ParticipantDisconnected, (participant: any) => {
-            console.log('[LiveKit] Participant disconnected:', participant.identity);
             const pid = participant.identity || participant.sid;
             setRemoteFeeds((prev) => {
               const next = new Map(prev);
@@ -599,7 +649,6 @@ export const LiveKitVideoRoom = ({
           });
 
           room.on(RoomEvent.TrackSubscribed, (track: any, publication: any, participant: any) => {
-            console.log('[LiveKit] Track subscribed:', track.kind, 'from', participant.identity);
             const pid = participant.identity || participant.sid;
             setRemoteFeeds((prev) => {
               const next = new Map(prev);
@@ -629,7 +678,6 @@ export const LiveKitVideoRoom = ({
           });
 
           room.on(RoomEvent.TrackUnsubscribed, (track: any, publication: any, participant: any) => {
-            console.log('[LiveKit] Track unsubscribed:', track.kind, 'from', participant.identity);
             const pid = participant.identity || participant.sid;
             setRemoteFeeds((prev) => {
               const next = new Map(prev);
@@ -693,11 +741,9 @@ export const LiveKitVideoRoom = ({
             if (state === 'disconnected') setConnectionStatus('connected_webrtc');
           });
 
-          // Connect to room
           await room.connect(serverUrl, token);
           setConnectionStatus('connected_livekit');
 
-          // Publish local tracks
           if (stream) {
             const videoTrack = stream.getVideoTracks()[0];
             const audioTrack = stream.getAudioTracks()[0];
@@ -705,7 +751,6 @@ export const LiveKitVideoRoom = ({
             if (audioTrack) await room.localParticipant.publishTrack(audioTrack);
           }
 
-          // Ingest any participants already present in the room
           room.remoteParticipants.forEach((p: any) => {
             updateParticipantFeed(p);
           });
@@ -718,7 +763,7 @@ export const LiveKitVideoRoom = ({
       console.warn('[LiveKitVideoRoom] Media token notice:', tokenErr);
       if (stream) setConnectionStatus('connected_webrtc');
     }
-  }, [meetingId, myIdentity, participantName, isHost, stopLocalTracks, cleanupPeerConnections, isMuted, isVideoEnabled]);
+  }, [meetingId, myIdentity, participantName, isHost, stopLocalTracks, cleanupPeerConnections, isMuted, isVideoEnabled, externalToggleVideo]);
 
   // Run initialization on mount & cleanup on unmount
   useEffect(() => {
@@ -767,6 +812,10 @@ export const LiveKitVideoRoom = ({
         localVideoRef.current.srcObject = localStreamRef.current;
         localVideoRef.current.play().catch(() => {});
       }
+      if (localMiniVideoRef.current && isVideoEnabled) {
+        localMiniVideoRef.current.srcObject = localStreamRef.current;
+        localMiniVideoRef.current.play().catch(() => {});
+      }
     }
 
     if (livekitRoomRef.current?.localParticipant) {
@@ -777,12 +826,83 @@ export const LiveKitVideoRoom = ({
   }, [isVideoEnabled]);
 
   const toggleCamera = () => {
-    setIsVideoEnabled((prev) => !prev);
+    if (externalToggleVideo) {
+      externalToggleVideo();
+    } else {
+      setInternalVideoEnabled((prev) => !prev);
+    }
   };
 
-  // Convert remoteFeeds map to array for rendering
   const remoteFeedList = Array.from(remoteFeeds.values());
 
+  // ---------------------------------------------------------------------------
+  // MINIMIZED VIEW: Compact Video Strip when Strategy Room is collapsed
+  // ---------------------------------------------------------------------------
+  if (!isDrawerOpen) {
+    return (
+      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+        {/* Local Participant Compact Thumbnail */}
+        <div
+          onClick={onExpandDrawer}
+          className={`relative w-12 h-9 sm:w-16 sm:h-11 rounded-lg bg-slate-900 border overflow-hidden flex items-center justify-center shrink-0 shadow cursor-pointer transition-all hover:scale-105 ${
+            isSpeakingLocally
+              ? 'border-[#a3e635] shadow-[0_0_8px_rgba(163,230,53,0.5)] ring-1 ring-[#a3e635]'
+              : 'border-slate-800 hover:border-slate-700'
+          }`}
+          title={`${participantName} (You) - Click to expand briefing`}
+        >
+          <video
+            ref={localMiniVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`w-full h-full object-cover transform -scale-x-100 ${
+              isVideoEnabled && !mediaError ? 'opacity-100' : 'opacity-0 hidden'
+            }`}
+          />
+          {(!isVideoEnabled || mediaError) && (
+            <div className="w-full h-full bg-slate-950 flex flex-col items-center justify-center text-center p-0.5">
+              <span className="text-[10px] font-bold text-[#a3e635]">
+                {participantName.slice(0, 1).toUpperCase()}
+              </span>
+            </div>
+          )}
+          <div className="absolute bottom-0 inset-x-0 bg-slate-950/85 px-1 py-0.5 flex items-center justify-between text-[8px] leading-none text-slate-300">
+            <span className="truncate max-w-[28px] sm:max-w-[36px]">You</span>
+            {isMuted ? (
+              <MicOff className="w-2 h-2 text-rose-400" />
+            ) : (
+              <Mic className="w-2 h-2 text-emerald-400" />
+            )}
+          </div>
+        </div>
+
+        {/* Remote Participants Compact Thumbnails */}
+        {remoteFeedList.map((feed) => (
+          <RemoteVideoTile
+            key={feed.participantId}
+            feed={feed}
+            compact={true}
+            onClick={onExpandDrawer}
+          />
+        ))}
+
+        {remoteFeedList.length === 0 && (
+          <div
+            onClick={onExpandDrawer}
+            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900/60 border border-dashed border-slate-800 text-[10px] text-slate-400 hover:text-white cursor-pointer transition-colors"
+          >
+            <Users className="w-3 h-3 text-slate-500" />
+            <span className="hidden sm:inline">Waiting for squad</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // FULL VIEW: Large Video Grid inside Expanded Strategy Room
+  // ---------------------------------------------------------------------------
   return (
     <div className="flex flex-col gap-2">
       {/* Header status bar */}
@@ -850,17 +970,7 @@ export const LiveKitVideoRoom = ({
       )}
 
       {/* Dynamic Grid of video tiles (Local + Remote Participants) */}
-      <div
-        className={`grid gap-2 ${
-          remoteFeedList.length === 0
-            ? 'grid-cols-2'
-            : remoteFeedList.length === 1
-            ? 'grid-cols-2'
-            : remoteFeedList.length <= 3
-            ? 'grid-cols-2'
-            : 'grid-cols-2'
-        }`}
-      >
+      <div className="grid grid-cols-2 gap-2">
         {/* Local user tile */}
         <div
           className={`relative aspect-video rounded-xl bg-slate-900 border overflow-hidden flex items-center justify-center shadow-lg transition-all ${
@@ -869,7 +979,6 @@ export const LiveKitVideoRoom = ({
               : 'border-slate-800'
           }`}
         >
-          {/* Real live local camera stream */}
           <video
             ref={localVideoRef}
             autoPlay
@@ -880,7 +989,6 @@ export const LiveKitVideoRoom = ({
             }`}
           />
 
-          {/* Tactical Avatar Fallback when Camera is disabled or error */}
           {(!isVideoEnabled || mediaError) && (
             <div className="w-full h-full bg-gradient-to-tr from-slate-950 via-slate-900 to-slate-800 flex flex-col items-center justify-center p-2 text-center animate-fade-in">
               <div
@@ -906,7 +1014,6 @@ export const LiveKitVideoRoom = ({
             </div>
           )}
 
-          {/* Realtime speaking audio indicator badge */}
           {isSpeakingLocally && (
             <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/60 text-emerald-300 text-[9px] font-bold uppercase tracking-wider flex items-center gap-1 animate-pulse">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
@@ -914,7 +1021,6 @@ export const LiveKitVideoRoom = ({
             </div>
           )}
 
-          {/* Bottom badge */}
           <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center justify-between text-[10px] bg-slate-950/85 px-2 py-0.5 rounded-md backdrop-blur-sm border border-slate-800/60">
             <span className="truncate max-w-[85px] text-slate-300 font-medium">
               {isHost ? 'Coach (You)' : `${participantName} (You)`}
@@ -944,14 +1050,13 @@ export const LiveKitVideoRoom = ({
           </div>
         ) : (
           remoteFeedList.map((feed) => (
-            <RemoteVideoTile key={feed.participantId} feed={feed} />
+            <RemoteVideoTile key={feed.participantId} feed={feed} compact={false} />
           ))
         )}
       </div>
 
-      {/* Local Controls Strip */}
+      {/* Local Controls Strip inside Expanded View */}
       <div className="flex items-center justify-between gap-2 mt-1 pt-2 border-t border-slate-800/80">
-        {/* Real microphone mute / unmute button */}
         <button
           onClick={onToggleMic}
           className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
@@ -969,7 +1074,6 @@ export const LiveKitVideoRoom = ({
           <span>{isMuted ? 'Mic Muted' : 'Mic Active'}</span>
         </button>
 
-        {/* Real camera start / stop button */}
         <button
           onClick={toggleCamera}
           className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
@@ -987,7 +1091,6 @@ export const LiveKitVideoRoom = ({
           <span>{isVideoEnabled ? 'Stop Video' : 'Start Video'}</span>
         </button>
 
-        {/* Device Refresh */}
         <button
           onClick={initMedia}
           className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"

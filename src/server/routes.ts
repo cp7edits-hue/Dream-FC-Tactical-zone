@@ -129,6 +129,7 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
     store.boards.set(meetingId, boardRecord);
     store.participants.set(hostParticipantId, hostParticipant);
     store.messages.set(meetingId, []);
+    store.syncToDisk();
 
     // Persist to Supabase if configured (asynchronous with safe null foreign keys)
     const supabase = getSupabase();
@@ -229,7 +230,12 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
 
     const { code, passcode, displayName, role } = parseResult.data;
 
-    let meetingId = store.meetingsByCode.get(code);
+    // Check memory store (supports lookup by squad code or canonical meeting UUID)
+    let meetingId = store.meetingsByCode.get(code) || (store.meetings.has(code) ? code : null);
+    if (!meetingId) {
+      store.syncFromDisk();
+      meetingId = store.meetingsByCode.get(code) || (store.meetings.has(code) ? code : null);
+    }
     let meeting = meetingId ? store.meetings.get(meetingId) : null;
 
     const supabase = getSupabase();
@@ -238,14 +244,15 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
         const { data: dbMeeting } = await supabase
           .from('meetings')
           .select('*')
-          .eq('code', code)
+          .or(`code.eq.${code},id.eq.${code}`)
           .maybeSingle();
 
         if (dbMeeting) {
           meetingId = dbMeeting.id;
           meeting = dbMeeting;
           store.meetings.set(dbMeeting.id, dbMeeting);
-          store.meetingsByCode.set(code, dbMeeting.id);
+          store.meetingsByCode.set(dbMeeting.code, dbMeeting.id);
+          store.syncToDisk();
 
           const { data: dbBoard } = await supabase
             .from('tactical_boards')
@@ -310,6 +317,7 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
     };
 
     store.participants.set(participantId, participant);
+    store.syncToDisk();
 
     if (supabase) {
       try {

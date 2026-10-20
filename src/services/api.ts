@@ -179,30 +179,7 @@ async function clientFallbackJoinMeeting(payload: JoinMeetingPayload) {
     if (err.message?.includes('passcode')) throw err;
   }
 
-  // If valid format, allow access to strategy room
-  if (code.startsWith('DFC-') && passcode.length >= 4) {
-    return {
-      success: true,
-      meeting: {
-        id: `m_${code}`,
-        code,
-        title: 'Dream FC Tactical Briefing',
-        status: 'active',
-        allowChat: true,
-        boardPermissionMode: 'coach_only',
-      },
-      participant: {
-        id: participantId,
-        displayName,
-        role: role || 'player',
-        admissionStatus: 'admitted',
-        canEditBoard: false,
-      },
-      sessionId,
-    };
-  }
-
-  throw new Error('Meeting not found. Please verify meeting code.');
+  throw new Error('Meeting not found. Please verify the meeting code or ensure the coach has launched the briefing.');
 }
 
 export const api = {
@@ -216,7 +193,12 @@ export const api = {
       });
 
       if (res.ok) {
-        return await res.json();
+        const data = await res.json();
+        try {
+          localStorage.setItem(`dfc_meeting_${data.meeting.code}`, JSON.stringify(data));
+          localStorage.setItem(`dfc_meeting_${data.meeting.id}`, JSON.stringify(data));
+        } catch {}
+        return data;
       }
 
       // Check for structured server errors
@@ -227,10 +209,16 @@ export const api = {
         serverError = err.error || err.message || '';
       }
 
-      // If endpoint is not found (e.g. 404 on Vercel without serverless rewrite) or network failed
+      if (serverError && res.status >= 400 && res.status < 500) {
+        throw new Error(serverError);
+      }
+
       console.warn(`[API] /api/meetings returned ${res.status} (${serverError}). Activating client fallback...`);
       return await clientFallbackCreateMeeting(payload);
     } catch (networkErr: any) {
+      if (networkErr.message && !networkErr.message.includes('fetch')) {
+        throw networkErr;
+      }
       console.warn('[API] /api/meetings network error:', networkErr);
       return await clientFallbackCreateMeeting(payload);
     }
@@ -246,23 +234,47 @@ export const api = {
       });
 
       if (res.ok) {
-        return await res.json();
+        const data = await res.json();
+        try {
+          localStorage.setItem(`dfc_meeting_${payload.code}`, JSON.stringify(data));
+          if (data.meeting?.id) {
+            localStorage.setItem(`dfc_meeting_${data.meeting.id}`, JSON.stringify(data));
+          }
+        } catch {}
+        return data;
       }
 
       const contentType = res.headers.get('content-type') || '';
+      let serverError = '';
       if (contentType.includes('application/json')) {
         const err = await res.json().catch(() => ({}));
-        const serverError = err.error || err.message || '';
-        // If wrong passcode or room locked/full, respect server error
-        if (res.status === 401 || res.status === 429 || res.status === 423 || res.status === 410) {
-          throw new Error(serverError || 'Failed to join meeting');
-        }
+        serverError = err.error || err.message || '';
+      }
+
+      // Respect explicit server validation, auth, and existence errors
+      if (res.status === 404) {
+        throw new Error(serverError || 'Meeting not found. Please verify meeting code or ID.');
+      }
+      if (res.status === 401) {
+        throw new Error(serverError || 'Incorrect passcode. Please verify and try again.');
+      }
+      if (res.status === 429) {
+        throw new Error(serverError || 'Meeting is at full capacity.');
+      }
+      if (res.status === 423) {
+        throw new Error(serverError || 'This meeting is locked by the host coach.');
+      }
+      if (res.status === 410) {
+        throw new Error(serverError || 'This tactical session has already ended.');
+      }
+      if (res.status === 400) {
+        throw new Error(serverError || 'Invalid credentials format.');
       }
 
       return await clientFallbackJoinMeeting(payload);
-    } catch (networkErr: any) {
-      if (networkErr.message?.includes('passcode') || networkErr.message?.includes('full')) {
-        throw networkErr;
+    } catch (err: any) {
+      if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+        throw err;
       }
       return await clientFallbackJoinMeeting(payload);
     }

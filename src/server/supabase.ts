@@ -5,7 +5,10 @@ let supabaseClient: SupabaseClient | null = null;
 export function getSupabase(): SupabaseClient | null {
   if (supabaseClient) return supabaseClient;
 
-  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const rawUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  // Sanitize URL: strip trailing /rest/v1 or slashes to prevent 404 / path duplication errors in SDK
+  const url = rawUrl ? rawUrl.replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '') : null;
+
   // Prefer service role key on the server (bypasses RLS for secure server actions)
   const key =
     process.env.SUPABASE_SERVICE_ROLE_KEY ||

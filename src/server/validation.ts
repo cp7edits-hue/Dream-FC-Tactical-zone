@@ -11,7 +11,7 @@ export const createMeetingSchema = z.object({
 });
 
 export const joinMeetingSchema = z.object({
-  code: z.string().trim().toUpperCase().regex(/^[A-Z0-9-]{4,16}$/, 'Invalid meeting code format'),
+  code: z.string().trim().toUpperCase().regex(/^[A-Z0-9-]{4,64}$/, 'Invalid meeting code or ID format'),
   passcode: z.string().trim().min(4, 'Passcode must be at least 4 characters').max(64),
   displayName: z.string().trim().min(2, 'Display name must be at least 2 characters').max(60),
   role: z.enum(['player', 'collaborator', 'analyst']).optional().default('player'),

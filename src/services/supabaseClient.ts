@@ -5,7 +5,8 @@ let client: SupabaseClient | null = null;
 export function getClientSupabase(): SupabaseClient | null {
   if (client) return client;
 
-  const url = import.meta.env.VITE_SUPABASE_URL || '';
+  const rawUrl = import.meta.env.VITE_SUPABASE_URL || '';
+  const url = rawUrl ? rawUrl.replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '') : '';
   const key = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
   if (!url || !key || url.includes('YOUR_SUPABASE_PROJECT_ID')) {
