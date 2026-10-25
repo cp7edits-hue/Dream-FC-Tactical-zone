@@ -685,7 +685,7 @@ apiRouter.get('/meetings/:meetingId/board', (req: Request, res: Response): void 
 // -----------------------------------------------------------------------------
 // 6. BOARD OPERATIONS (Move marker, set formation, draw path)
 // -----------------------------------------------------------------------------
-apiRouter.post('/meetings/:meetingId/board/operations', (req: Request, res: Response): void => {
+apiRouter.post(['/meetings/:meetingId/board/operations', '/meetings/:meetingId/operations'], (req: Request, res: Response): void => {
   const participant = getSessionParticipant(req);
   if (!participant || participant.meeting_id !== req.params.meetingId) {
     res.status(403).json({ error: 'Unauthorized' });
@@ -709,7 +709,8 @@ apiRouter.post('/meetings/:meetingId/board/operations', (req: Request, res: Resp
     return;
   }
 
-  const parseResult = boardOperationSchema.safeParse(req.body);
+  const rawBody = req.body?.operation ? req.body.operation : req.body;
+  const parseResult = boardOperationSchema.safeParse(rawBody);
   if (!parseResult.success) {
     res.status(400).json({ error: 'Invalid board operation payload', details: parseResult.error.format() });
     return;
@@ -727,6 +728,9 @@ apiRouter.post('/meetings/:meetingId/board/operations', (req: Request, res: Resp
     position?: { x: number; z: number };
     formation?: string;
     path?: any;
+    paths?: any[];
+    pathId?: string;
+    speed?: number;
     boardState?: any;
   };
 

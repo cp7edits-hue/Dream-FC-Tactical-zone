@@ -112,21 +112,31 @@ async function clientFallbackCreateMeeting(payload: CreateMeetingPayload) {
 }
 
 async function clientFallbackJoinMeeting(payload: JoinMeetingPayload) {
-  const { code, passcode, displayName, role } = payload;
+  const { code: rawCode, passcode: rawPasscode, displayName, role } = payload;
   const participantId = typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
     : `p_${Date.now()}`;
   const sessionId = `s_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
+  const cleanCode = rawCode.trim().toUpperCase().replace(/\s+/g, '');
+  const candidateCodes = [
+    cleanCode,
+    cleanCode.startsWith('DFC-') ? cleanCode.replace(/^DFC-/, '') : `DFC-${cleanCode}`,
+  ];
+
   // 1. Try Supabase
   const supabase = getClientSupabase();
   if (supabase) {
     try {
-      const { data: dbMeeting } = await supabase
-        .from('meetings')
-        .select('*')
-        .eq('code', code)
-        .maybeSingle();
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawCode.trim());
+      let query = supabase.from('meetings').select('*');
+      if (isUuid) {
+        query = query.eq('id', rawCode.trim().toLowerCase());
+      } else {
+        const primaryCode = candidateCodes.find((c) => c.startsWith('DFC-')) || cleanCode;
+        query = query.eq('code', primaryCode);
+      }
+      const { data: dbMeeting } = await query.maybeSingle();
 
       if (dbMeeting) {
         return {
@@ -156,30 +166,41 @@ async function clientFallbackJoinMeeting(payload: JoinMeetingPayload) {
 
   // 2. Try localStorage
   try {
-    const stored = localStorage.getItem(`dfc_meeting_${code}`);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      if (parsed.passcode && parsed.passcode.toUpperCase() !== passcode.toUpperCase()) {
-        throw new Error('Incorrect passcode. Please check and try again.');
+    for (const cand of candidateCodes) {
+      const stored = localStorage.getItem(`dfc_meeting_${cand}`);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed.passcode) {
+          const p1 = parsed.passcode.toUpperCase().replace(/\s+/g, '');
+          const p2 = rawPasscode.toUpperCase().replace(/\s+/g, '');
+          const match =
+            p1 === p2 ||
+            p1.replace(/^TACTIC-/, '') === p2.replace(/^TACTIC-/, '') ||
+            `TACTIC-${p1}` === p2 ||
+            p1 === `TACTIC-${p2}`;
+          if (!match) {
+            throw new Error('Incorrect passcode. Please check and try again.');
+          }
+        }
+        return {
+          success: true,
+          meeting: parsed.meeting,
+          participant: {
+            id: participantId,
+            displayName,
+            role: role || 'player',
+            admissionStatus: 'admitted',
+            canEditBoard: parsed.meeting.boardPermissionMode === 'open_collaboration',
+          },
+          sessionId,
+        };
       }
-      return {
-        success: true,
-        meeting: parsed.meeting,
-        participant: {
-          id: participantId,
-          displayName,
-          role: role || 'player',
-          admissionStatus: 'admitted',
-          canEditBoard: parsed.meeting.boardPermissionMode === 'open_collaboration',
-        },
-        sessionId,
-      };
     }
   } catch (err: any) {
     if (err.message?.includes('passcode')) throw err;
   }
 
-  throw new Error('Meeting not found. Please verify the meeting code or ensure the coach has launched the briefing.');
+  throw new Error('Meeting not found. Please verify the squad code (e.g. DFC-HRZX) or ensure the coach has launched the session.');
 }
 
 export const api = {

@@ -58,15 +58,34 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
     }
   };
 
+  const handleCodeChange = (val: string) => {
+    // Check if user pasted full invite: e.g. "Meeting Code: DFC-8492\nPasscode: TACTIC-7721"
+    if (val.includes('Code:') || val.includes('Passcode:')) {
+      const codeMatch = val.match(/Code:\s*([A-Za-z0-9-]+)/i);
+      const passMatch = val.match(/Passcode:\s*([A-Za-z0-9-]+)/i);
+      if (codeMatch && codeMatch[1]) {
+        setJoinCode(codeMatch[1].toUpperCase().trim());
+      }
+      if (passMatch && passMatch[1]) {
+        setJoinPasscode(passMatch[1].trim());
+      }
+      return;
+    }
+    setJoinCode(val.toUpperCase().replace(/\s+/g, ''));
+  };
+
   const handleJoinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setErrorMsg(null);
 
+    const cleanCode = joinCode.trim().toUpperCase().replace(/\s+/g, '');
+    const cleanPasscode = joinPasscode.trim();
+
     try {
       const res = await api.joinMeeting({
-        code: joinCode.trim().toUpperCase(),
-        passcode: joinPasscode.trim(),
+        code: cleanCode,
+        passcode: cleanPasscode,
         displayName: joinName.trim(),
         role: joinRole,
       });
@@ -74,7 +93,7 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
       onSuccess(res.meeting, res.participant);
       onClose();
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to join meeting');
+      setErrorMsg(err.message || 'Failed to join meeting. Please verify credentials.');
     } finally {
       setLoading(false);
     }
@@ -250,8 +269,8 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
               <input
                 type="text"
                 value={joinCode}
-                onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                placeholder="e.g. DFC-8492"
+                onChange={(e) => handleCodeChange(e.target.value)}
+                placeholder="e.g. DFC-8492 or 8492"
                 required
                 className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs uppercase focus:outline-none focus:border-[#a3e635]"
               />

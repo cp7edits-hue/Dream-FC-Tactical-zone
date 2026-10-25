@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { CameraPreset, Player, TacticalPath } from '../types/tactics';
+import { CameraPreset, Player, TacticalPath, SimulationStatus } from '../types/tactics';
 import { playMarkerClickSound } from '../utils/audio';
 
 // Constants
@@ -24,6 +24,7 @@ export class PitchScene {
   private ballMesh: THREE.Group | null = null;
   private pathObjectsGroup: THREE.Group = new THREE.Group();
   private activeHaloMesh: THREE.Mesh | null = null;
+  private snapTargetRingMesh: THREE.Mesh | null = null;
 
   // Interaction & Raycasting
   private raycaster: THREE.Raycaster = new THREE.Raycaster();
@@ -38,17 +39,25 @@ export class PitchScene {
   private isDrawingMode: boolean = false;
   private currentDrawType: 'pass' | 'run' | 'press' | 'zone' = 'pass';
   private drawStartPoint: THREE.Vector3 | null = null;
-  private drawPreviewMesh: THREE.Mesh | null = null;
+  private drawPreviewMesh: THREE.Group | null = null;
+  private drawingFromPlayerId: string | null = null;
+  private drawingFromPlayerName: string | null = null;
+  private drawingToPlayerId: string | null = null;
+  private drawingToPlayerName: string | null = null;
+  private currentPaths: TacticalPath[] = [];
 
   // Camera animation
   private targetCameraPos: THREE.Vector3 = new THREE.Vector3(0, 24, 46);
   private targetLookAt: THREE.Vector3 = new THREE.Vector3(0, 0, -6);
   private isCameraTransitioning: boolean = false;
 
-  // Sequence playback animation
-  private isSequencePlaying: boolean = false;
-  private sequenceProgress: number = 0;
-  private sequenceStartSnapshot: Map<string, THREE.Vector3> = new Map();
+  // Simulation engine state
+  private simulationStatus: SimulationStatus = 'idle';
+  private currentPassIndex: number = 0;
+  private currentPassProgress: number = 0;
+  private simulationSpeed: number = 1.0;
+  private simulationSnapshot: Map<string, THREE.Vector3> = new Map();
+  private simulationPasses: TacticalPath[] = [];
 
   // Motion preference
   private prefersReducedMotion: boolean = false;
@@ -58,6 +67,7 @@ export class PitchScene {
   public onPlayerMove?: (playerId: string, pos: { x: number; z: number }) => void;
   public onBallMove?: (pos: { x: number; z: number }) => void;
   public onPathDrawn?: (path: TacticalPath) => void;
+  public onSimulationStatusChange?: (status: SimulationStatus, currentPassIndex: number) => void;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -674,7 +684,7 @@ export class PitchScene {
     this.scene.add(ballGroup);
   }
 
-  // --- SELECTION HALO RING (Matching Reference Image) ---
+  // --- SELECTION HALO RING & SNAP HIGHLIGHT ---
   private buildActiveHalo() {
     const haloGeo = new THREE.RingGeometry(1.6, 1.85, 48);
     const haloMat = new THREE.MeshBasicMaterial({
@@ -689,6 +699,21 @@ export class PitchScene {
     this.activeHaloMesh.position.y = 0.03;
     this.activeHaloMesh.visible = false;
     this.scene.add(this.activeHaloMesh);
+
+    // Target snap ring for pass receiving player
+    const targetGeo = new THREE.RingGeometry(1.9, 2.2, 48);
+    const targetMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+    this.snapTargetRingMesh = new THREE.Mesh(targetGeo, targetMat);
+    this.snapTargetRingMesh.rotation.x = -Math.PI / 2;
+    this.snapTargetRingMesh.position.y = 0.04;
+    this.snapTargetRingMesh.visible = false;
+    this.scene.add(this.snapTargetRingMesh);
   }
 
   public setActivePlayer(playerId: string | null) {
@@ -705,8 +730,9 @@ export class PitchScene {
     }
   }
 
-  // --- TACTICAL PATHS & ARROWS (Matching Reference Images!) ---
+  // --- TACTICAL PATHS & ARROWS (Coach Drawn with Sequence Badges) ---
   public setPaths(paths: TacticalPath[]) {
+    this.currentPaths = paths;
     // Clear previous paths
     while (this.pathObjectsGroup.children.length > 0) {
       const child = this.pathObjectsGroup.children[0];
@@ -728,14 +754,24 @@ export class PitchScene {
     if (!path.points || path.points.length < 2) return null;
 
     const group = new THREE.Group();
-    const colorHex = path.color || (path.type === 'run' ? '#a3e635' : path.type === 'press' ? '#ef4444' : '#ffffff');
+    let colorHex = path.color;
+    if (!colorHex) {
+      if (path.type === 'pass') {
+        colorHex = path.status === 'active' ? '#a3e635' : path.status === 'completed' ? '#10b981' : '#38bdf8';
+      } else if (path.type === 'run') {
+        colorHex = '#f59e0b';
+      } else if (path.type === 'press') {
+        colorHex = '#ef4444';
+      } else {
+        colorHex = '#a855f7';
+      }
+    }
     const color = new THREE.Color(colorHex);
 
     const p0 = path.points[0];
     const pEnd = path.points[path.points.length - 1];
 
     if (path.type === 'zone') {
-      // Area zone highlight
       const zoneGeo = new THREE.CircleGeometry(4, 32);
       const zoneMat = new THREE.MeshBasicMaterial({
         color,
@@ -751,10 +787,9 @@ export class PitchScene {
       return group;
     }
 
-    // Build curve (straight line or curved arc)
+    // Straight line by default (only curve if explicitly run type with 2 points)
     const curvePoints: THREE.Vector3[] = [];
     if (path.points.length === 2 && path.type === 'run') {
-      // Add subtle curve offset for runs
       const mid = new THREE.Vector3((p0.x + pEnd.x) / 2, 0.04, (p0.z + pEnd.z) / 2);
       const dir = new THREE.Vector3(pEnd.x - p0.x, 0, pEnd.z - p0.z);
       const perp = new THREE.Vector3(-dir.z, 0, dir.x).normalize().multiplyScalar(4);
@@ -774,10 +809,10 @@ export class PitchScene {
       curvePoints.push(new THREE.Vector3(p0.x, 0.04, p0.z), new THREE.Vector3(pEnd.x, 0.04, pEnd.z));
     }
 
-    // Create ribbon strip for the path line
+    // Ribbon strip for path line
     const ribbonGeo = new THREE.BufferGeometry();
     const vertices: number[] = [];
-    const width = path.type === 'press' ? 0.35 : 0.45;
+    const width = path.type === 'pass' ? 0.45 : path.type === 'press' ? 0.35 : 0.42;
 
     for (let i = 0; i < curvePoints.length - 1; i++) {
       const cur = curvePoints[i];
@@ -801,13 +836,13 @@ export class PitchScene {
       color,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: path.type === 'press' ? 0.7 : 0.9,
+      opacity: path.status === 'completed' ? 0.55 : 0.95,
       depthWrite: false,
     });
     const lineMesh = new THREE.Mesh(ribbonGeo, ribbonMat);
     group.add(lineMesh);
 
-    // Arrowhead at the end point
+    // Arrowhead at destination
     const lastP = curvePoints[curvePoints.length - 1];
     const prevP = curvePoints[curvePoints.length - 2];
     const tangent = new THREE.Vector3().subVectors(lastP, prevP).normalize();
@@ -825,6 +860,50 @@ export class PitchScene {
     arrowHead.position.set(lastP.x, 0.05, lastP.z);
     group.add(arrowHead);
 
+    // Sequence order badge (1, 2, 3...)
+    if (path.type === 'pass' && path.order) {
+      const badgeCanvas = document.createElement('canvas');
+      badgeCanvas.width = 128;
+      badgeCanvas.height = 128;
+      const bCtx = badgeCanvas.getContext('2d')!;
+
+      const isActive = path.status === 'active';
+      const isCompleted = path.status === 'completed';
+
+      // Badge background circle
+      bCtx.fillStyle = isActive ? '#a3e635' : isCompleted ? '#059669' : '#0f172a';
+      bCtx.beginPath();
+      bCtx.arc(64, 64, 58, 0, Math.PI * 2);
+      bCtx.fill();
+
+      // Border ring
+      bCtx.lineWidth = 8;
+      bCtx.strokeStyle = isActive ? '#ffffff' : '#38bdf8';
+      bCtx.stroke();
+
+      // Sequence number
+      bCtx.fillStyle = isActive ? '#020617' : '#ffffff';
+      bCtx.font = 'bold 64px Montserrat, sans-serif';
+      bCtx.textAlign = 'center';
+      bCtx.textBaseline = 'middle';
+      bCtx.fillText(`${path.order}`, 64, 66);
+
+      const badgeTexture = new THREE.CanvasTexture(badgeCanvas);
+      badgeTexture.colorSpace = THREE.SRGBColorSpace;
+
+      const badgeGeo = new THREE.PlaneGeometry(1.6, 1.6);
+      const badgeMat = new THREE.MeshBasicMaterial({
+        map: badgeTexture,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const badgeMesh = new THREE.Mesh(badgeGeo, badgeMat);
+      badgeMesh.rotation.x = -Math.PI / 2;
+      badgeMesh.position.set((p0.x + pEnd.x) / 2, 0.08, (p0.z + pEnd.z) / 2);
+      group.add(badgeMesh);
+    }
+
     return group;
   }
 
@@ -833,22 +912,18 @@ export class PitchScene {
     this.isCameraTransitioning = true;
     switch (preset) {
       case 'broadcast':
-        // Exactly matches reference images!
         this.targetCameraPos.set(0, 24, 46);
         this.targetLookAt.set(0, 0, -6);
         break;
       case 'overhead':
-        // Pure top-down tactical chalkboard view
         this.targetCameraPos.set(0, 68, 0.1);
         this.targetLookAt.set(0, 0, 0);
         break;
       case 'attacking':
-        // Zoomed into final third towards north goal
         this.targetCameraPos.set(0, 16, 18);
         this.targetLookAt.set(0, 0, -32);
         break;
       case 'defending':
-        // Zoomed into defensive half towards south goal
         this.targetCameraPos.set(0, 16, -18);
         this.targetLookAt.set(0, 0, 32);
         break;
@@ -865,73 +940,86 @@ export class PitchScene {
     }
   }
 
-  // --- PLAYBACK ANIMATION SEQUENCE ---
-  public playSequence(paths: TacticalPath[]) {
-    if (this.isSequencePlaying) return;
-    this.isSequencePlaying = true;
-    this.sequenceProgress = 0;
+  // --- SEQUENTIAL PASS SIMULATION ENGINE ---
+  public playSimulation(passes: TacticalPath[]) {
+    const validPasses = passes.filter((p) => p.type === 'pass' && p.points && p.points.length >= 2);
+    if (validPasses.length === 0) return;
 
-    // Snapshot current positions
-    this.sequenceStartSnapshot.clear();
+    // Snapshot pre-simulation positions
+    this.simulationSnapshot.clear();
     this.playerGroups.forEach((grp, id) => {
-      this.sequenceStartSnapshot.set(id, grp.position.clone());
+      this.simulationSnapshot.set(id, grp.position.clone());
     });
     if (this.ballMesh) {
-      this.sequenceStartSnapshot.set('ball', this.ballMesh.position.clone());
+      this.simulationSnapshot.set('ball', this.ballMesh.position.clone());
     }
 
-    // Identify paths to animate
-    const runPaths = paths.filter((p) => p.type === 'run');
-    const passPaths = paths.filter((p) => p.type === 'pass');
+    this.simulationPasses = validPasses.map((p, idx) => ({
+      ...p,
+      order: p.order || idx + 1,
+      status: (idx === 0 ? 'active' : 'pending') as 'active' | 'pending',
+    }));
 
-    // Run animation loop over 3 seconds
-    const duration = 3.2; // seconds
-    let elapsed = 0;
-
-    const animateStep = () => {
-      const dt = this.clock.getDelta();
-      elapsed += dt;
-      const progress = Math.min(elapsed / duration, 1);
-      const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
-
-      // Animate ball along passes
-      if (passPaths.length > 0 && this.ballMesh) {
-        const activePass = passPaths[0];
-        const pStart = activePass.points[0];
-        const pEnd = activePass.points[activePass.points.length - 1];
-        this.ballMesh.position.x = pStart.x + (pEnd.x - pStart.x) * ease;
-        this.ballMesh.position.z = pStart.z + (pEnd.z - pStart.z) * ease;
+    // Record starting position for pass 0 receiving player
+    const firstPass = this.simulationPasses[0];
+    if (firstPass?.toPlayerId) {
+      const recGrp = this.playerGroups.get(firstPass.toPlayerId);
+      if (recGrp) {
+        recGrp.userData.simPassStartPos = recGrp.position.clone();
       }
+    }
 
-      // Animate players along run paths
-      runPaths.forEach((path) => {
-        // Find nearest player to start of run
-        let nearestGroup: THREE.Group | null = null;
-        let minDist = 8;
-        this.playerGroups.forEach((grp) => {
-          const d = Math.hypot(grp.position.x - path.points[0].x, grp.position.z - path.points[0].z);
-          if (d < minDist) {
-            minDist = d;
-            nearestGroup = grp;
-          }
-        });
+    this.currentPassIndex = 0;
+    this.currentPassProgress = 0;
+    this.simulationStatus = 'playing';
 
-        if (nearestGroup) {
-          const pStart = path.points[0];
-          const pEnd = path.points[path.points.length - 1];
-          (nearestGroup as THREE.Group).position.x = pStart.x + (pEnd.x - pStart.x) * ease;
-          (nearestGroup as THREE.Group).position.z = pStart.z + (pEnd.z - pStart.z) * ease;
-        }
-      });
+    this.setPaths(this.simulationPasses);
+    this.onSimulationStatusChange?.('playing', 0);
+  }
 
-      if (progress < 1 && this.isSequencePlaying) {
-        requestAnimationFrame(animateStep);
+  public pauseSimulation() {
+    if (this.simulationStatus === 'playing') {
+      this.simulationStatus = 'paused';
+      this.onSimulationStatusChange?.('paused', this.currentPassIndex);
+    }
+  }
+
+  public resumeSimulation() {
+    if (this.simulationStatus === 'paused') {
+      this.simulationStatus = 'playing';
+      this.onSimulationStatusChange?.('playing', this.currentPassIndex);
+    }
+  }
+
+  public resetSimulation() {
+    // Restore all players and ball to snapshot
+    this.simulationSnapshot.forEach((pos, id) => {
+      if (id === 'ball' && this.ballMesh) {
+        this.ballMesh.position.copy(pos);
+        this.onBallMove?.({ x: pos.x, z: pos.z });
       } else {
-        this.isSequencePlaying = false;
+        const grp = this.playerGroups.get(id);
+        if (grp) {
+          grp.position.copy(pos);
+          grp.userData.targetPosition.copy(pos);
+          delete grp.userData.simPassStartPos;
+          this.onPlayerMove?.(id, { x: pos.x, z: pos.z });
+        }
       }
-    };
+    });
 
-    requestAnimationFrame(animateStep);
+    this.simulationStatus = 'idle';
+    this.currentPassIndex = 0;
+    this.currentPassProgress = 0;
+
+    // Reset pass statuses back to pending
+    const resetPasses = this.currentPaths.map((p) => ({ ...p, status: 'pending' as const }));
+    this.setPaths(resetPasses);
+    this.onSimulationStatusChange?.('idle', 0);
+  }
+
+  public setSimulationSpeed(speed: number) {
+    this.simulationSpeed = Math.max(0.5, Math.min(speed, 3.0));
   }
 
   // --- DRAWING MODE SETTER ---
@@ -939,9 +1027,14 @@ export class PitchScene {
     this.isDrawingMode = enabled;
     this.currentDrawType = type;
     this.controls.enabled = !enabled; // disable camera orbit while drawing
-    if (!enabled && this.drawPreviewMesh) {
-      this.scene.remove(this.drawPreviewMesh);
-      this.drawPreviewMesh = null;
+    if (!enabled) {
+      if (this.drawPreviewMesh) {
+        this.scene.remove(this.drawPreviewMesh);
+        this.drawPreviewMesh = null;
+      }
+      if (this.snapTargetRingMesh) {
+        this.snapTargetRingMesh.visible = false;
+      }
     }
   }
 
@@ -966,7 +1059,35 @@ export class PitchScene {
       if (!hit) return;
 
       if (this.isDrawingMode) {
-        this.drawStartPoint = hit.clone();
+        // Find if snapping to an origin player or ball
+        let snapStartPlayerId: string | null = null;
+        let snapStartPlayerName: string | null = null;
+        let snapPos = hit.clone();
+
+        let closestDist = 2.6;
+        this.playerGroups.forEach((grp, id) => {
+          const dist = Math.hypot(hit.x - grp.position.x, hit.z - grp.position.z);
+          if (dist < closestDist) {
+            closestDist = dist;
+            snapStartPlayerId = id;
+            snapStartPlayerName = grp.userData?.player?.name || null;
+            snapPos.set(grp.position.x, 0.05, grp.position.z);
+          }
+        });
+
+        // Or ball
+        if (!snapStartPlayerId && this.ballMesh) {
+          const bDist = Math.hypot(hit.x - this.ballMesh.position.x, hit.z - this.ballMesh.position.z);
+          if (bDist < 2.0) {
+            snapPos.set(this.ballMesh.position.x, 0.05, this.ballMesh.position.z);
+          }
+        }
+
+        this.drawStartPoint = snapPos;
+        this.drawingFromPlayerId = snapStartPlayerId;
+        this.drawingFromPlayerName = snapStartPlayerName;
+        this.drawingToPlayerId = null;
+        this.drawingToPlayerName = null;
         return;
       }
 
@@ -1011,7 +1132,6 @@ export class PitchScene {
 
       // Handle entity dragging
       if (this.draggedEntity && this.isPointerDown) {
-        // Clamp to pitch bounds
         const clampedX = Math.max(-PITCH_WIDTH / 2 - 2, Math.min(PITCH_WIDTH / 2 + 2, hit.x));
         const clampedZ = Math.max(-PITCH_LENGTH / 2 - 2, Math.min(PITCH_LENGTH / 2 + 2, hit.z));
 
@@ -1030,24 +1150,58 @@ export class PitchScene {
         return;
       }
 
-      // Handle drawing preview
+      // Handle drawing preview with snap to receiving player
       if (this.isDrawingMode && this.drawStartPoint && this.isPointerDown) {
-        // Update or create preview line
-        if (!this.drawPreviewMesh) {
-          const previewGeo = new THREE.BufferGeometry();
-          previewGeo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
-          this.drawPreviewMesh = new THREE.Mesh(
-            previewGeo,
-            new THREE.MeshBasicMaterial({ color: 0xa3e635, side: THREE.DoubleSide })
-          );
-          this.scene.add(this.drawPreviewMesh);
+        let currentEnd = hit.clone();
+        let targetSnapPlayerId: string | null = null;
+        let targetSnapPlayerName: string | null = null;
+
+        // Check snapping to receiving player
+        let closestDist = 2.6;
+        this.playerGroups.forEach((grp, id) => {
+          if (id === this.drawingFromPlayerId) return; // avoid snapping to self
+          const dist = Math.hypot(hit.x - grp.position.x, hit.z - grp.position.z);
+          if (dist < closestDist) {
+            closestDist = dist;
+            targetSnapPlayerId = id;
+            targetSnapPlayerName = grp.userData?.player?.name || null;
+            currentEnd.set(grp.position.x, 0.05, grp.position.z);
+          }
+        });
+
+        this.drawingToPlayerId = targetSnapPlayerId;
+        this.drawingToPlayerName = targetSnapPlayerName;
+
+        // Update target snap ring highlight
+        if (targetSnapPlayerId && this.snapTargetRingMesh) {
+          this.snapTargetRingMesh.position.set(currentEnd.x, 0.04, currentEnd.z);
+          this.snapTargetRingMesh.visible = true;
+        } else if (this.snapTargetRingMesh) {
+          this.snapTargetRingMesh.visible = false;
         }
 
-        const positions = new Float32Array([
-          this.drawStartPoint.x, 0.05, this.drawStartPoint.z,
-          hit.x, 0.05, hit.z,
-        ]);
-        this.drawPreviewMesh.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        // Render live preview line
+        if (!this.drawPreviewMesh) {
+          const previewGroup = new THREE.Group();
+          const lineGeo = new THREE.BufferGeometry();
+          lineGeo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+          const lineMesh = new THREE.Line(
+            lineGeo,
+            new THREE.LineBasicMaterial({ color: 0xa3e635, linewidth: 3 })
+          );
+          previewGroup.add(lineMesh);
+          this.drawPreviewMesh = previewGroup;
+          this.scene.add(previewGroup);
+        }
+
+        const lineObj = this.drawPreviewMesh.children[0] as THREE.Line;
+        if (lineObj) {
+          const positions = new Float32Array([
+            this.drawStartPoint.x, 0.05, this.drawStartPoint.z,
+            currentEnd.x, 0.05, currentEnd.z,
+          ]);
+          lineObj.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        }
       }
     };
 
@@ -1065,15 +1219,28 @@ export class PitchScene {
       if (this.isDrawingMode && this.drawStartPoint) {
         const hit = getPitchIntersection(e);
         if (hit) {
-          const dist = Math.hypot(hit.x - this.drawStartPoint.x, hit.z - this.drawStartPoint.z);
+          let finalEnd = hit.clone();
+          if (this.drawingToPlayerId) {
+            const grp = this.playerGroups.get(this.drawingToPlayerId);
+            if (grp) finalEnd.set(grp.position.x, 0.05, grp.position.z);
+          }
+
+          const dist = Math.hypot(finalEnd.x - this.drawStartPoint.x, finalEnd.z - this.drawStartPoint.z);
           if (dist > 1.5) {
+            const order = (this.currentPaths?.filter((p) => p.type === 'pass').length || 0) + 1;
             const newPath: TacticalPath = {
-              id: 'path_' + Date.now(),
+              id: 'pass_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
               type: this.currentDrawType,
               points: [
                 { x: this.drawStartPoint.x, z: this.drawStartPoint.z },
-                { x: hit.x, z: hit.z },
+                { x: finalEnd.x, z: finalEnd.z },
               ],
+              order: this.currentDrawType === 'pass' ? order : undefined,
+              fromPlayerId: this.drawingFromPlayerId || undefined,
+              fromPlayerName: this.drawingFromPlayerName || undefined,
+              toPlayerId: this.drawingToPlayerId || undefined,
+              toPlayerName: this.drawingToPlayerName || undefined,
+              status: 'pending',
             };
             this.onPathDrawn?.(newPath);
             playMarkerClickSound();
@@ -1084,7 +1251,14 @@ export class PitchScene {
           this.scene.remove(this.drawPreviewMesh);
           this.drawPreviewMesh = null;
         }
+        if (this.snapTargetRingMesh) {
+          this.snapTargetRingMesh.visible = false;
+        }
         this.drawStartPoint = null;
+        this.drawingFromPlayerId = null;
+        this.drawingFromPlayerName = null;
+        this.drawingToPlayerId = null;
+        this.drawingToPlayerName = null;
       }
     };
 
@@ -1127,13 +1301,13 @@ export class PitchScene {
     this.renderer.setSize(w, h);
   };
 
-  // --- ANIMATION TICK ---
+  // --- ANIMATION TICK & SIMULATION STEP ---
   private animate = () => {
     this.animationFrameId = requestAnimationFrame(this.animate);
 
     const delta = this.clock.getDelta();
 
-    // Smooth camera preset interpolation
+    // 1. Smooth camera preset interpolation
     if (this.isCameraTransitioning) {
       this.camera.position.lerp(this.targetCameraPos, 0.05);
       this.controls.target.lerp(this.targetLookAt, 0.05);
@@ -1148,10 +1322,73 @@ export class PitchScene {
 
     this.controls.update();
 
-    // Smooth player positions when switching formations (damping)
+    // 2. Sequential simulation playback
+    if (this.simulationStatus === 'playing' && this.simulationPasses.length > 0) {
+      const passDuration = 1.3 / this.simulationSpeed;
+      this.currentPassProgress += delta / passDuration;
+      const t = Math.min(this.currentPassProgress, 1.0);
+      const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+
+      const activePass = this.simulationPasses[this.currentPassIndex];
+      if (activePass && activePass.points.length >= 2) {
+        const pStart = activePass.points[0];
+        const pEnd = activePass.points[1];
+
+        // Animate ball continuously with realistic arc
+        if (this.ballMesh) {
+          const ballX = pStart.x + (pEnd.x - pStart.x) * ease;
+          const ballZ = pStart.z + (pEnd.z - pStart.z) * ease;
+          const ballY = 0.55 + Math.sin(t * Math.PI) * 0.45;
+          this.ballMesh.position.set(ballX, ballY, ballZ);
+          this.onBallMove?.({ x: ballX, z: ballZ });
+        }
+
+        // Animate assigned receiving player coin to designated position
+        if (activePass.toPlayerId) {
+          const receiverGroup = this.playerGroups.get(activePass.toPlayerId);
+          if (receiverGroup) {
+            const startPos = receiverGroup.userData.simPassStartPos || receiverGroup.position.clone();
+            const recX = startPos.x + (pEnd.x - startPos.x) * ease;
+            const recZ = startPos.z + (pEnd.z - startPos.z) * ease;
+            receiverGroup.position.set(recX, 0, recZ);
+            receiverGroup.userData.targetPosition.set(recX, 0, recZ);
+            this.onPlayerMove?.(activePass.toPlayerId, { x: recX, z: recZ });
+            if (this.hoveredPlayerId === activePass.toPlayerId && this.activeHaloMesh) {
+              this.activeHaloMesh.position.set(recX, 0.03, recZ);
+            }
+          }
+        }
+
+        // Advance when pass completes
+        if (t >= 1.0) {
+          activePass.status = 'completed';
+          this.currentPassIndex += 1;
+          this.currentPassProgress = 0;
+
+          if (this.currentPassIndex < this.simulationPasses.length) {
+            const nextPass = this.simulationPasses[this.currentPassIndex];
+            nextPass.status = 'active';
+            if (nextPass.toPlayerId) {
+              const nextReceiver = this.playerGroups.get(nextPass.toPlayerId);
+              if (nextReceiver) {
+                nextReceiver.userData.simPassStartPos = nextReceiver.position.clone();
+              }
+            }
+            this.setPaths(this.simulationPasses);
+            this.onSimulationStatusChange?.('playing', this.currentPassIndex);
+          } else {
+            this.simulationStatus = 'completed';
+            this.setPaths(this.simulationPasses);
+            this.onSimulationStatusChange?.('completed', this.currentPassIndex);
+          }
+        }
+      }
+    }
+
+    // 3. Smooth player positions when switching formations (damping)
     this.playerGroups.forEach((grp) => {
       const target = grp.userData.targetPosition as THREE.Vector3;
-      if (target && grp.position.distanceTo(target) > 0.01) {
+      if (target && grp.position.distanceTo(target) > 0.01 && this.simulationStatus !== 'playing') {
         if (this.prefersReducedMotion) {
           grp.position.copy(target);
         } else {

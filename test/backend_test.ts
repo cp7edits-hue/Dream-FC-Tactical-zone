@@ -106,6 +106,52 @@ async function runTests() {
     assert(joinData.meeting.participants.some((p: any) => p.name === 'Coach Pep'), 'Host should be present in participants list');
     console.log('   ✓ Player successfully joined the meeting with full squad list');
 
+    // 5B-2: Join Meeting with RAW 4-character code (without DFC- prefix) and RAW 4-digit passcode (without TACTIC-)
+    const rawCode = createData.meeting.code.replace(/^DFC-/, '').toLowerCase();
+    const rawPasscode = createData.meeting.passcode.replace(/^TACTIC-/, '');
+    const flexibleJoinRes = await fetch(`${baseUrl}/api/meetings/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: `  ${rawCode}  `, // tests whitespace trimming and raw code normalization
+        passcode: rawPasscode, // tests raw 4-digit passcode normalization
+        displayName: 'Bukayo Saka',
+        role: 'player',
+      }),
+    });
+    assert.strictEqual(flexibleJoinRes.status, 200, `Flexible join should return 200, got ${flexibleJoinRes.status}`);
+    const flexData = await flexibleJoinRes.json();
+    assert.strictEqual(flexData.meeting.code, createData.meeting.code);
+    console.log(`   ✓ Player successfully joined using raw code "${rawCode}" and raw passcode "${rawPasscode}"`);
+
+    // 5B-3: Board operation test for pass sequence and simulation
+    const boardOpRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/operations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({
+        operation: {
+          type: 'set_paths',
+          payload: {
+            paths: [
+              {
+                id: 'pass_1',
+                type: 'pass',
+                points: [{ x: 0, z: 0 }, { x: 10, z: -10 }],
+                order: 1,
+                fromPlayerName: 'De Bruyne',
+                toPlayerName: 'Haaland',
+              },
+            ],
+          },
+        },
+      }),
+    });
+    assert.strictEqual(boardOpRes.status, 200, `Board set_paths should succeed, got ${boardOpRes.status}`);
+    console.log('   ✓ Board operation set_paths verified');
+
     // 5C: Join Meeting with invalid passcode
     const invalidJoinRes = await fetch(`${baseUrl}/api/meetings/join`, {
       method: 'POST',

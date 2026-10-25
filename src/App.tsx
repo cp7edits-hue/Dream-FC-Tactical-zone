@@ -20,6 +20,7 @@ import {
   TacticalDrill,
   TacticalPath,
   TacticalPathType,
+  SimulationStatus,
 } from './types/tactics';
 import { FORMATIONS, getAwayFormation } from './constants/formations';
 import { PRESET_DRILLS } from './constants/drills';
@@ -76,8 +77,8 @@ export default function App() {
     return visiblePlayers.find((p) => p.id === activePlayerId) || null;
   }, [activePlayerId, visiblePlayers]);
 
-  // Tactical paths
-  const [paths, setPaths] = useState<TacticalPath[]>(() => PRESET_DRILLS[0].paths);
+  // Tactical paths (starts clean: no automatic curves)
+  const [paths, setPaths] = useState<TacticalPath[]>([]);
   const [undoStack, setUndoStack] = useState<TacticalPath[][]>([]);
   const [redoStack, setRedoStack] = useState<TacticalPath[][]>([]);
 
@@ -127,10 +128,12 @@ export default function App() {
     return path === '/404' || (path !== '/' && !path.startsWith('/api') && !path.startsWith('/meetings'));
   });
 
-  // Drawing Tools
+  // Drawing Tools & Pass Simulation
   const [isDrawingMode, setIsDrawingMode] = useState(false);
   const [drawingType, setDrawingType] = useState<TacticalPathType>('pass');
-  const [isPlayingSequence, setIsPlayingSequence] = useState(false);
+  const [simulationStatus, setSimulationStatus] = useState<SimulationStatus>('idle');
+  const [currentSimPassIndex, setCurrentSimPassIndex] = useState(0);
+  const [simulationSpeed, setSimulationSpeed] = useState(1);
 
   // Status banner
   const [notification, setNotification] = useState<string | null>(null);
@@ -163,6 +166,18 @@ export default function App() {
           }
           if (state.ball) {
             setBallPosition(state.ball);
+          }
+          if (state.simulation) {
+            if (state.simulation.status === 'playing') {
+              setSimulationStatus('playing');
+              sceneRef.current?.playSimulation(state.paths || paths);
+            } else if (state.simulation.status === 'paused') {
+              setSimulationStatus('paused');
+              sceneRef.current?.pauseSimulation();
+            } else if (state.simulation.status === 'idle') {
+              setSimulationStatus('idle');
+              sceneRef.current?.resetSimulation();
+            }
           }
           if (data.updatedBy && data.updatedBy !== (isHost ? meeting.hostName : '')) {
             showNotification(`Board updated by ${data.updatedBy}`);
@@ -348,7 +363,12 @@ export default function App() {
       setPaths((prev) => {
         setUndoStack((u) => [...u, prev]);
         setRedoStack([]);
-        return [...prev, newPath];
+        const passCount = prev.filter((p) => p.type === 'pass').length;
+        const formatted =
+          newPath.type === 'pass' && !newPath.order
+            ? { ...newPath, order: passCount + 1 }
+            : newPath;
+        return [...prev, formatted];
       });
 
       if (meeting?.id) {
@@ -399,6 +419,9 @@ export default function App() {
     setUndoStack((prev) => [...prev, paths]);
     setRedoStack([]);
     setPaths([]);
+    setSimulationStatus('idle');
+    setCurrentSimPassIndex(0);
+    sceneRef.current?.resetSimulation();
     playMarkerClickSound();
 
     if (meeting?.id) {
@@ -415,14 +438,136 @@ export default function App() {
     }
   };
 
-  const handlePlaySequence = () => {
-    if (isPlayingSequence) return;
-    setIsPlayingSequence(true);
+  const handlePlaySimulation = () => {
+    const passes = paths.filter((p) => p.type === 'pass');
+    if (passes.length === 0) {
+      showNotification('Draw at least one pass before starting simulation');
+      return;
+    }
     playWhistleSound();
-    sceneRef.current?.playSequence(paths);
-    setTimeout(() => {
-      setIsPlayingSequence(false);
-    }, 3400);
+    setSimulationStatus('playing');
+    sceneRef.current?.playSimulation(paths);
+    if (meeting?.id) {
+      api.sendBoardOperation(meeting.id, {
+        type: 'simulate_play',
+        payload: { speed: simulationSpeed },
+      }).catch(() => {});
+    }
+  };
+
+  const handlePauseSimulation = () => {
+    sceneRef.current?.pauseSimulation();
+    setSimulationStatus('paused');
+    if (meeting?.id) {
+      api.sendBoardOperation(meeting.id, {
+        type: 'simulate_pause',
+        payload: {},
+      }).catch(() => {});
+    }
+  };
+
+  const handleResumeSimulation = () => {
+    sceneRef.current?.resumeSimulation();
+    setSimulationStatus('playing');
+    if (meeting?.id) {
+      api.sendBoardOperation(meeting.id, {
+        type: 'simulate_resume',
+        payload: {},
+      }).catch(() => {});
+    }
+  };
+
+  const handleResetSimulation = () => {
+    sceneRef.current?.resetSimulation();
+    setSimulationStatus('idle');
+    setCurrentSimPassIndex(0);
+    setPaths((prev) => prev.map((p) => (p.type === 'pass' ? { ...p, status: 'pending' } : p)));
+    if (meeting?.id) {
+      api.sendBoardOperation(meeting.id, {
+        type: 'simulate_reset',
+        payload: {},
+      }).catch(() => {});
+    }
+  };
+
+  const handleDeletePass = (passId: string) => {
+    setPaths((prev) => {
+      setUndoStack((u) => [...u, prev]);
+      setRedoStack([]);
+      const filtered = prev.filter((p) => p.id !== passId);
+      let passCounter = 1;
+      const reindexed = filtered.map((p) => {
+        if (p.type === 'pass') {
+          return { ...p, order: passCounter++ };
+        }
+        return p;
+      });
+      return reindexed;
+    });
+
+    if (meeting?.id) {
+      api.sendBoardOperation(meeting.id, {
+        type: 'delete_path',
+        payload: { pathId: passId },
+      }).catch(() => {});
+    }
+  };
+
+  const handleMovePassUp = (passIdx: number) => {
+    setPaths((prev) => {
+      const passes = prev.filter((p) => p.type === 'pass');
+      const others = prev.filter((p) => p.type !== 'pass');
+      if (passIdx <= 0 || passIdx >= passes.length) return prev;
+      setUndoStack((u) => [...u, prev]);
+      setRedoStack([]);
+      const newPasses = [...passes];
+      const temp = newPasses[passIdx - 1];
+      newPasses[passIdx - 1] = newPasses[passIdx];
+      newPasses[passIdx] = temp;
+      newPasses.forEach((p, idx) => {
+        p.order = idx + 1;
+      });
+      const updated = [...others, ...newPasses];
+      if (meeting?.id) {
+        api.sendBoardOperation(meeting.id, {
+          type: 'set_paths',
+          payload: { paths: updated },
+        }).catch(() => {});
+      }
+      return updated;
+    });
+  };
+
+  const handleMovePassDown = (passIdx: number) => {
+    setPaths((prev) => {
+      const passes = prev.filter((p) => p.type === 'pass');
+      const others = prev.filter((p) => p.type !== 'pass');
+      if (passIdx < 0 || passIdx >= passes.length - 1) return prev;
+      setUndoStack((u) => [...u, prev]);
+      setRedoStack([]);
+      const newPasses = [...passes];
+      const temp = newPasses[passIdx + 1];
+      newPasses[passIdx + 1] = newPasses[passIdx];
+      newPasses[passIdx] = temp;
+      newPasses.forEach((p, idx) => {
+        p.order = idx + 1;
+      });
+      const updated = [...others, ...newPasses];
+      if (meeting?.id) {
+        api.sendBoardOperation(meeting.id, {
+          type: 'set_paths',
+          payload: { paths: updated },
+        }).catch(() => {});
+      }
+      return updated;
+    });
+  };
+
+  const handleToggleSpeed = () => {
+    const nextSpeed = simulationSpeed === 1 ? 1.5 : simulationSpeed === 1.5 ? 2 : 1;
+    setSimulationSpeed(nextSpeed);
+    sceneRef.current?.setSimulationSpeed(nextSpeed);
+    showNotification(`Simulation speed: ${nextSpeed}x`);
   };
 
   const handleToggleSound = () => {
@@ -567,6 +712,13 @@ export default function App() {
         onPathDrawn={handlePathDrawn}
         onSceneReady={(sc) => {
           sceneRef.current = sc;
+          sc.onSimulationStatusChange = (status, idx) => {
+            setSimulationStatus(status);
+            setCurrentSimPassIndex(idx);
+            if (status === 'completed') {
+              showNotification('Pass sequence completed');
+            }
+          };
         }}
       />
 
@@ -607,14 +759,24 @@ export default function App() {
           isDrawingMode={isDrawingMode}
           drawingType={drawingType}
           onSelectDrawTool={handleSelectDrawTool}
-          onPlaySequence={handlePlaySequence}
+          paths={paths}
+          simulationStatus={simulationStatus}
+          currentPassIndex={currentSimPassIndex}
+          onPlaySimulation={handlePlaySimulation}
+          onPauseSimulation={handlePauseSimulation}
+          onResumeSimulation={handleResumeSimulation}
+          onResetSimulation={handleResetSimulation}
+          onDeletePass={handleDeletePass}
+          onMovePassUp={handleMovePassUp}
+          onMovePassDown={handleMovePassDown}
           onResetFormation={handleResetFormation}
           onClearPaths={handleClearPaths}
           onUndo={handleUndo}
           onRedo={handleRedo}
           canUndo={undoStack.length > 0}
           canRedo={redoStack.length > 0}
-          isPlaying={isPlayingSequence}
+          simulationSpeed={simulationSpeed}
+          onToggleSpeed={handleToggleSpeed}
         />
       )}
 
