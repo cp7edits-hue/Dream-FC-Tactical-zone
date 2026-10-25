@@ -164,7 +164,40 @@ async function runTests() {
       }),
     });
     assert.strictEqual(invalidJoinRes.status, 401, 'Invalid passcode should return 401');
-    console.log('   ✓ Invalid passcode correctly rejected with 401');
+    const invalidData = await invalidJoinRes.json();
+    assert.strictEqual(invalidData.code, 'INVALID_PASSCODE');
+    console.log('   ✓ Invalid passcode correctly rejected with 401 and INVALID_PASSCODE code');
+
+    // 5C-2: Join Meeting with nonexistent code
+    const notFoundRes = await fetch(`${baseUrl}/api/meetings/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: 'DFC-NONEXISTENT',
+        passcode: 'TACTIC-1234',
+        displayName: 'Lost Player',
+        role: 'player',
+      }),
+    });
+    assert.strictEqual(notFoundRes.status, 404, 'Nonexistent code should return 404');
+    const notFoundData = await notFoundRes.json();
+    assert.strictEqual(notFoundData.code, 'MEETING_NOT_FOUND');
+    console.log('   ✓ Nonexistent meeting code correctly rejected with 404 and MEETING_NOT_FOUND code');
+
+    // 5C-3: Join Meeting with space-separated code (e.g. speech-to-text "DFC HRZX")
+    const spacedCode = createData.meeting.code.replace('-', ' ');
+    const spacedJoinRes = await fetch(`${baseUrl}/api/meetings/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: spacedCode,
+        passcode: createData.meeting.passcode,
+        displayName: 'Mobile User',
+        role: 'player',
+      }),
+    });
+    assert.strictEqual(spacedJoinRes.status, 200, 'Space-separated code should be normalized and return 200');
+    console.log(`   ✓ Space-separated code "${spacedCode}" successfully normalized and joined`);
 
     // 5D: Health check endpoint
     const healthRes = await fetch(`${baseUrl}/api/health`);

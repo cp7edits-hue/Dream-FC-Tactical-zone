@@ -204,7 +204,7 @@ async function clientFallbackJoinMeeting(payload: JoinMeetingPayload) {
 }
 
 export const api = {
-  // 1. Create meeting
+  // 1. Create meeting (Must persist to server before reporting success)
   async createMeeting(payload: CreateMeetingPayload) {
     try {
       const res = await fetch('/api/meetings', {
@@ -213,8 +213,13 @@ export const api = {
         body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        const data = await res.json();
+      const contentType = res.headers.get('content-type') || '';
+      let data: any = null;
+      if (contentType.includes('application/json')) {
+        data = await res.json().catch(() => null);
+      }
+
+      if (res.ok && data?.success) {
         try {
           localStorage.setItem(`dfc_meeting_${data.meeting.code}`, JSON.stringify(data));
           localStorage.setItem(`dfc_meeting_${data.meeting.id}`, JSON.stringify(data));
@@ -222,42 +227,45 @@ export const api = {
         return data;
       }
 
-      // Check for structured server errors
-      const contentType = res.headers.get('content-type') || '';
-      let serverError = '';
-      if (contentType.includes('application/json')) {
-        const err = await res.json().catch(() => ({}));
-        serverError = err.error || err.message || '';
-      }
-
-      if (serverError && res.status >= 400 && res.status < 500) {
+      const serverError = data?.error || data?.message || '';
+      if (serverError) {
         throw new Error(serverError);
       }
-
-      console.warn(`[API] /api/meetings returned ${res.status} (${serverError}). Activating client fallback...`);
-      return await clientFallbackCreateMeeting(payload);
+      throw new Error(`Server returned error (${res.status}). Failed to persist meeting to shared backend.`);
     } catch (networkErr: any) {
       if (networkErr.message && !networkErr.message.includes('fetch')) {
         throw networkErr;
       }
-      console.warn('[API] /api/meetings network error:', networkErr);
-      return await clientFallbackCreateMeeting(payload);
+      console.error('[API] /api/meetings network error:', networkErr);
+      throw new Error('Unable to connect to strategy server. Please verify your internet connection and try again.');
     }
   },
 
-  // 2. Join meeting
+  // 2. Join meeting (Authoritative cross-device lookup)
   async joinMeeting(payload: JoinMeetingPayload) {
+    const cleanCode = payload.code.trim().toUpperCase().replace(/\s+/g, '');
+    const cleanPasscode = payload.passcode.trim();
+
     try {
       const res = await fetch('/api/meetings/join', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          ...payload,
+          code: cleanCode,
+          passcode: cleanPasscode,
+        }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
+      const contentType = res.headers.get('content-type') || '';
+      let data: any = null;
+      if (contentType.includes('application/json')) {
+        data = await res.json().catch(() => null);
+      }
+
+      if (res.ok && data?.success) {
         try {
-          localStorage.setItem(`dfc_meeting_${payload.code}`, JSON.stringify(data));
+          localStorage.setItem(`dfc_meeting_${data.meeting.code}`, JSON.stringify(data));
           if (data.meeting?.id) {
             localStorage.setItem(`dfc_meeting_${data.meeting.id}`, JSON.stringify(data));
           }
@@ -265,39 +273,93 @@ export const api = {
         return data;
       }
 
-      const contentType = res.headers.get('content-type') || '';
-      let serverError = '';
-      if (contentType.includes('application/json')) {
-        const err = await res.json().catch(() => ({}));
-        serverError = err.error || err.message || '';
-      }
+      const serverError = data?.error || data?.message || '';
 
-      // Respect explicit server validation, auth, and existence errors
+      // Surface precise server validation and lifecycle errors
       if (res.status === 404) {
-        throw new Error(serverError || 'Meeting not found. Please verify meeting code or ID.');
+        throw new Error(serverError || 'Meeting not found. Please verify the squad code or confirm the coach has launched the session.');
       }
       if (res.status === 401) {
-        throw new Error(serverError || 'Incorrect passcode. Please verify and try again.');
+        throw new Error(serverError || 'Incorrect passcode. Please check and try again.');
       }
       if (res.status === 429) {
-        throw new Error(serverError || 'Meeting is at full capacity.');
+        throw new Error(serverError || 'Meeting is full. Maximum participant capacity reached.');
       }
       if (res.status === 423) {
-        throw new Error(serverError || 'This meeting is locked by the host coach.');
+        throw new Error(serverError || 'This strategy room is currently locked by the coach.');
       }
       if (res.status === 410) {
         throw new Error(serverError || 'This tactical session has already ended.');
       }
       if (res.status === 400) {
-        throw new Error(serverError || 'Invalid credentials format.');
+        throw new Error(serverError || 'Invalid meeting code or passcode format.');
       }
 
-      return await clientFallbackJoinMeeting(payload);
+      if (serverError) {
+        throw new Error(serverError);
+      }
+      throw new Error(`Server returned error (${res.status}). Failed to join meeting.`);
     } catch (err: any) {
-      if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+      // Re-throw our explicit domain errors
+      if (
+        err.message?.includes('passcode') ||
+        err.message?.includes('locked') ||
+        err.message?.includes('ended') ||
+        err.message?.includes('full') ||
+        err.message?.includes('not found') ||
+        err.message?.includes('Invalid')
+      ) {
         throw err;
       }
-      return await clientFallbackJoinMeeting(payload);
+
+      // Check client Supabase direct lookup if server was unreachable via network
+      const clientSupabase = getClientSupabase();
+      if (clientSupabase) {
+        try {
+          const candidateCodes = [
+            cleanCode,
+            cleanCode.startsWith('DFC-') ? cleanCode.replace(/^DFC-/, '') : `DFC-${cleanCode}`,
+          ];
+          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanCode);
+          let query = clientSupabase.from('meetings').select('*');
+          if (isUuid) {
+            query = query.eq('id', cleanCode.toLowerCase());
+          } else {
+            query = query.in('code', candidateCodes);
+          }
+          const { data: dbMeeting, error: dbErr } = await query.maybeSingle();
+
+          if (!dbErr && dbMeeting) {
+            return {
+              success: true,
+              meeting: {
+                id: dbMeeting.id,
+                code: dbMeeting.code,
+                title: dbMeeting.title,
+                status: dbMeeting.status,
+                allowChat: dbMeeting.allow_chat ?? true,
+                boardPermissionMode: dbMeeting.board_permission_mode ?? 'coach_only',
+              },
+              participant: {
+                id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `p_${Date.now()}`,
+                displayName: payload.displayName,
+                role: payload.role || 'player',
+                admissionStatus: 'admitted',
+                canEditBoard: dbMeeting.board_permission_mode === 'open_collaboration',
+              },
+              sessionId: `s_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+            };
+          }
+        } catch (dbErr: any) {
+          console.warn('[Direct Supabase] Fallback query failed:', dbErr?.message);
+        }
+      }
+
+      if (err.message && (err.message.includes('fetch') || err.message.includes('NetworkError'))) {
+        throw new Error('Unable to connect to strategy server. Please verify your network connection and try again.');
+      }
+
+      throw err;
     }
   },
 

@@ -133,8 +133,12 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
 
     // Persist to Supabase if configured (asynchronous with safe null foreign keys)
     const supabase = getSupabase();
+    let supabasePersisted = false;
+    let supabaseErrorMsg: string | null = null;
+
     if (supabase) {
       try {
+        console.log(`[Meeting Create] Attempting to persist meeting "${code}" to Supabase database...`);
         const { error: mErr } = await supabase.from('meetings').insert({
           id: meetingId,
           code,
@@ -148,8 +152,16 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
           allow_chat: allowChat,
           lobby_enabled: lobbyEnabled,
         });
+
         if (mErr) {
-          console.warn('[Supabase] Warning on meetings insert:', mErr.message);
+          supabaseErrorMsg = mErr.message;
+          console.error('[Supabase DB Diagnostic] Meetings table insert failed:', mErr.message, '(code:', mErr.code, ')');
+          if (mErr.message.includes('schema cache') || mErr.code === 'PGRST205') {
+            console.error('[Supabase DB Diagnostic] Table "public.meetings" is not created in Supabase yet. Run migrations/000_complete_supabase_setup.sql in your Supabase SQL editor.');
+          }
+        } else {
+          supabasePersisted = true;
+          console.log(`[Supabase DB Diagnostic] Meeting "${code}" (${meetingId}) successfully saved to Supabase.`);
         }
 
         const { error: bErr } = await supabase.from('tactical_boards').insert({
@@ -159,8 +171,8 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
           revision: 1,
           updated_by: null,
         });
-        if (bErr) {
-          console.warn('[Supabase] Warning on tactical_boards insert:', bErr.message);
+        if (bErr && !supabaseErrorMsg) {
+          console.warn('[Supabase DB Diagnostic] Tactical boards insert warning:', bErr.message);
         }
 
         const { error: pErr } = await supabase.from('meeting_participants').insert({
@@ -174,12 +186,15 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
           is_muted: false,
           can_edit_board: true,
         });
-        if (pErr) {
-          console.warn('[Supabase] Warning on meeting_participants insert:', pErr.message);
+        if (pErr && !supabaseErrorMsg) {
+          console.warn('[Supabase DB Diagnostic] Meeting participants insert warning:', pErr.message);
         }
       } catch (dbErr: any) {
-        console.warn('[Supabase] Persistence warning (in-memory remains authoritative):', dbErr?.message);
+        supabaseErrorMsg = dbErr?.message || 'Database connection error';
+        console.warn('[Supabase DB Diagnostic] Persistence error:', dbErr?.message);
       }
+    } else {
+      console.log(`[Meeting Create] Supabase not configured. Meeting "${code}" stored in server memory & disk.`);
     }
 
     // Set secure HTTP-only cookie
@@ -236,66 +251,34 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawTrimmed);
     const normalizedUuid = isUuid ? rawTrimmed.toLowerCase() : null;
 
-    // Build candidate codes (e.g. user typed "HRZX" -> check "HRZX" & "DFC-HRZX", or user typed "DFC-HRZX" -> check both)
+    // Build candidate codes (e.g. "HRZX", "DFC-HRZX", or space-separated "DFC HRZX" -> "DFCVB6N")
     const codeCandidates: string[] = [upperTrimmed];
     if (upperTrimmed.startsWith('DFC-')) {
       codeCandidates.push(upperTrimmed.replace(/^DFC-/, ''));
+    } else if (upperTrimmed.startsWith('DFC') && upperTrimmed.length > 3) {
+      const suffix = upperTrimmed.substring(3).replace(/^-+/, '');
+      codeCandidates.push(suffix);
+      codeCandidates.push(`DFC-${suffix}`);
     } else if (/^[A-Z0-9]{4}$/.test(upperTrimmed)) {
       codeCandidates.push(`DFC-${upperTrimmed}`);
     }
 
-    // 1. Check in-memory store
+    console.log(`[Meeting Join] Incoming join request: code="${rawTrimmed}", displayName="${displayName}", role="${role || 'player'}"`);
+
+    // 1. Query Supabase database first for canonical multi-device cross-container state
+    const supabase = getSupabase();
     let meetingId: string | null = null;
     let meeting: any = null;
 
-    const findInMemory = () => {
-      // Direct lookup by candidate code
-      for (const cand of codeCandidates) {
-        if (store.meetingsByCode.has(cand)) {
-          meetingId = store.meetingsByCode.get(cand)!;
-          meeting = store.meetings.get(meetingId);
-          if (meeting) return true;
-        }
-      }
-      // Direct lookup by UUID
-      if (normalizedUuid && store.meetings.has(normalizedUuid)) {
-        meetingId = normalizedUuid;
-        meeting = store.meetings.get(normalizedUuid);
-        if (meeting) return true;
-      }
-      // Scan all stored meetings
-      for (const m of store.meetings.values()) {
-        const mCode = m.code ? m.code.toUpperCase() : '';
-        if (
-          codeCandidates.includes(mCode) ||
-          codeCandidates.some((c) => mCode.endsWith(c) || c.endsWith(mCode)) ||
-          (normalizedUuid && m.id.toLowerCase() === normalizedUuid)
-        ) {
-          meetingId = m.id;
-          meeting = m;
-          return true;
-        }
-      }
-      return false;
-    };
-
-    if (!findInMemory()) {
-      store.syncFromDisk();
-      findInMemory();
-    }
-
-    // 2. Query Supabase safely (prevent PostgreSQL uuid casting errors on DFC- strings)
-    const supabase = getSupabase();
-    if (!meeting && supabase) {
+    if (supabase) {
       try {
         let query = supabase.from('meetings').select('*');
         if (normalizedUuid) {
           query = query.eq('id', normalizedUuid);
         } else {
-          const primaryCode = codeCandidates.find((c) => c.startsWith('DFC-')) || upperTrimmed;
-          query = query.eq('code', primaryCode);
+          query = query.in('code', codeCandidates);
         }
-        const { data: dbMeeting } = await query.maybeSingle();
+        const { data: dbMeeting, error: dbErr } = await query.maybeSingle();
 
         if (dbMeeting) {
           meetingId = dbMeeting.id;
@@ -303,6 +286,7 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
           store.meetings.set(dbMeeting.id, dbMeeting);
           store.meetingsByCode.set(dbMeeting.code, dbMeeting.id);
           store.syncToDisk();
+          console.log(`[Meeting Join] Found meeting in Supabase database: id="${dbMeeting.id}", code="${dbMeeting.code}", status="${dbMeeting.status}"`);
 
           const { data: dbBoard } = await supabase
             .from('tactical_boards')
@@ -313,38 +297,92 @@ apiRouter.post('/meetings/join', async (req: Request, res: Response): Promise<vo
           if (dbBoard) {
             store.boards.set(dbMeeting.id, dbBoard);
           }
+        } else if (dbErr) {
+          console.warn('[Meeting Join] Supabase query notice:', dbErr.message);
         }
       } catch (dbErr: any) {
-        console.warn('[Supabase] Query warning looking up meeting:', dbErr?.message);
+        console.warn('[Meeting Join] Supabase lookup error:', dbErr?.message);
+      }
+    }
+
+    // 2. Fall back to in-memory / local disk store
+    if (!meeting) {
+      const findInMemory = () => {
+        // Direct lookup by candidate code
+        for (const cand of codeCandidates) {
+          if (store.meetingsByCode.has(cand)) {
+            meetingId = store.meetingsByCode.get(cand)!;
+            meeting = store.meetings.get(meetingId);
+            if (meeting) return true;
+          }
+        }
+        // Direct lookup by UUID
+        if (normalizedUuid && store.meetings.has(normalizedUuid)) {
+          meetingId = normalizedUuid;
+          meeting = store.meetings.get(normalizedUuid);
+          if (meeting) return true;
+        }
+        // Scan all stored meetings
+        for (const m of store.meetings.values()) {
+          const mCode = m.code ? m.code.toUpperCase() : '';
+          if (
+            codeCandidates.includes(mCode) ||
+            codeCandidates.some((c) => mCode.endsWith(c) || c.endsWith(mCode)) ||
+            (normalizedUuid && m.id.toLowerCase() === normalizedUuid)
+          ) {
+            meetingId = m.id;
+            meeting = m;
+            return true;
+          }
+        }
+        return false;
+      };
+
+      if (!findInMemory()) {
+        store.syncFromDisk();
+        findInMemory();
+      }
+
+      if (meeting) {
+        console.log(`[Meeting Join] Found meeting in server memory store: id="${meeting.id}", code="${meeting.code}", status="${meeting.status}"`);
       }
     }
 
     if (!meeting || !meetingId) {
-      res.status(404).json({ error: 'Meeting not found. Please verify the squad code or meeting ID.' });
+      console.warn(`[Meeting Join] Failed: No session found for input="${rawTrimmed}". Searched candidates:`, codeCandidates);
+      res.status(404).json({
+        error: 'Meeting not found. Please verify the squad code (e.g. DFC-HRZX) or confirm the coach has launched the briefing.',
+        code: 'MEETING_NOT_FOUND',
+        searched: codeCandidates,
+      });
       return;
     }
 
     if (meeting.status === 'ended') {
-      res.status(410).json({ error: 'This tactical session has already ended.' });
+      console.warn(`[Meeting Join] Rejected: Session "${meeting.code}" has already ended.`);
+      res.status(410).json({ error: 'This tactical session has already ended.', code: 'MEETING_ENDED' });
       return;
     }
 
     if (meeting.status === 'locked') {
-      res.status(423).json({ error: 'This meeting is locked by the host coach.' });
+      console.warn(`[Meeting Join] Rejected: Session "${meeting.code}" is locked by coach.`);
+      res.status(423).json({ error: 'This strategy room is currently locked by the coach.', code: 'MEETING_LOCKED' });
       return;
     }
 
     // Passcode verification using bcrypt
     const isPasscodeValid = await verifyPasscode(passcode, meeting.access_secret_hash);
     if (!isPasscodeValid) {
-      res.status(401).json({ error: 'Incorrect passcode. Please check and try again.' });
+      console.warn(`[Meeting Join] Rejected: Incorrect passcode for session "${meeting.code}".`);
+      res.status(401).json({ error: 'Incorrect passcode. Please check and try again.', code: 'INVALID_PASSCODE' });
       return;
     }
 
     // Check capacity
     const activeParticipants = store.getMeetingParticipants(meetingId);
     if (activeParticipants.length >= meeting.max_participants) {
-      res.status(429).json({ error: 'Meeting is full. Maximum participant capacity reached.' });
+      console.warn(`[Meeting Join] Rejected: Session "${meeting.code}" is at maximum capacity.`);
+      res.status(429).json({ error: 'Meeting is full. Maximum participant capacity reached.', code: 'MEETING_FULL' });
       return;
     }
 
@@ -481,18 +519,27 @@ apiRouter.get('/meetings/:meetingId', async (req: Request, res: Response): Promi
   const supabase = getSupabase();
   if (!meeting && supabase) {
     try {
-      const { data: dbMeeting } = await supabase
-        .from('meetings')
-        .select('*')
-        .or(`id.eq.${meetingId},code.eq.${meetingId}`)
-        .maybeSingle();
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(meetingId);
+      let query = supabase.from('meetings').select('*');
+      if (isUuid) {
+        query = query.eq('id', meetingId.toLowerCase());
+      } else {
+        const upperCode = meetingId.toUpperCase().trim();
+        query = query.in('code', [
+          upperCode,
+          upperCode.startsWith('DFC-') ? upperCode.replace(/^DFC-/, '') : `DFC-${upperCode}`,
+        ]);
+      }
+      const { data: dbMeeting } = await query.maybeSingle();
 
       if (dbMeeting) {
         meeting = dbMeeting;
         store.meetings.set(dbMeeting.id, dbMeeting);
         store.meetingsByCode.set(dbMeeting.code, dbMeeting.id);
       }
-    } catch {}
+    } catch (e: any) {
+      console.warn('[Supabase] GET /meetings/:id lookup notice:', e?.message);
+    }
   }
 
   if (!meeting) {
@@ -583,7 +630,11 @@ apiRouter.post('/meetings/:meetingId/token', async (req: Request, res: Response)
       if (isUuid) {
         query = query.eq('id', meetingId.toLowerCase());
       } else {
-        query = query.eq('code', meetingId.toUpperCase());
+        const upperCode = meetingId.toUpperCase();
+        query = query.in('code', [
+          upperCode,
+          upperCode.startsWith('DFC-') ? upperCode.replace(/^DFC-/, '') : `DFC-${upperCode}`,
+        ]);
       }
       const { data: dbMeeting } = await query.maybeSingle();
 

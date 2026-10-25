@@ -59,19 +59,29 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
   };
 
   const handleCodeChange = (val: string) => {
-    // Check if user pasted full invite: e.g. "Meeting Code: DFC-8492\nPasscode: TACTIC-7721"
+    // Check if user pasted full invite: e.g. "Code: DFC-8492\nPasscode: TACTIC-7721"
     if (val.includes('Code:') || val.includes('Passcode:')) {
       const codeMatch = val.match(/Code:\s*([A-Za-z0-9-]+)/i);
       const passMatch = val.match(/Passcode:\s*([A-Za-z0-9-]+)/i);
       if (codeMatch && codeMatch[1]) {
-        setJoinCode(codeMatch[1].toUpperCase().trim());
+        let extractedCode = codeMatch[1].toUpperCase().trim().replace(/\s+/g, '');
+        if (/^DFC[A-Z0-9]{4}$/.test(extractedCode)) {
+          extractedCode = `DFC-${extractedCode.substring(3)}`;
+        }
+        setJoinCode(extractedCode);
       }
       if (passMatch && passMatch[1]) {
         setJoinPasscode(passMatch[1].trim());
       }
       return;
     }
-    setJoinCode(val.toUpperCase().replace(/\s+/g, ''));
+
+    let cleaned = val.toUpperCase().replace(/\s+/g, '');
+    // If user enters DFCHRZX without hyphen, auto-insert hyphen
+    if (/^DFC[A-Z0-9]{4}$/.test(cleaned)) {
+      cleaned = `DFC-${cleaned.substring(3)}`;
+    }
+    setJoinCode(cleaned);
   };
 
   const handleJoinSubmit = async (e: React.FormEvent) => {
