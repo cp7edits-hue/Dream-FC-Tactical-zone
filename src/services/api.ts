@@ -416,6 +416,52 @@ export const api = {
           const { data: dbMeeting, error: dbErr } = await query.maybeSingle();
 
           if (!dbErr && dbMeeting) {
+            const guestParticipantId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `p_${Date.now()}`;
+            try {
+              await clientSupabase.from('meeting_participants').insert({
+                id: guestParticipantId,
+                meeting_id: dbMeeting.id,
+                authenticated_user_id: null,
+                session_identifier: `s_${Date.now()}`,
+                display_name: payload.displayName,
+                role: payload.role || 'player',
+                admission_status: 'admitted',
+                is_muted: false,
+                can_edit_board: dbMeeting.board_permission_mode === 'open_collaboration',
+              });
+            } catch {}
+
+            let existingSquad: any[] = [];
+            try {
+              const { data: dbParts } = await clientSupabase
+                .from('meeting_participants')
+                .select('*')
+                .eq('meeting_id', dbMeeting.id);
+              if (dbParts && dbParts.length > 0) {
+                existingSquad = dbParts.map((p: any) => ({
+                  id: p.id,
+                  name: p.display_name,
+                  role: p.role === 'host' ? 'Head Coach' : p.role,
+                  isMuted: p.is_muted ?? false,
+                  isSpeaking: false,
+                  canEditBoard: p.can_edit_board ?? false,
+                  avatarColor: p.role === 'host' ? 'bg-[#a3e635] text-slate-950' : 'bg-blue-600 text-white',
+                }));
+              }
+            } catch {}
+
+            if (!existingSquad.some((p: any) => p.id === guestParticipantId || p.name === payload.displayName)) {
+              existingSquad.push({
+                id: guestParticipantId,
+                name: payload.displayName,
+                role: payload.role || 'player',
+                isMuted: false,
+                isSpeaking: false,
+                canEditBoard: dbMeeting.board_permission_mode === 'open_collaboration',
+                avatarColor: 'bg-blue-600 text-white',
+              });
+            }
+
             return {
               success: true,
               meeting: {
@@ -425,9 +471,11 @@ export const api = {
                 status: dbMeeting.status,
                 allowChat: dbMeeting.allow_chat ?? true,
                 boardPermissionMode: dbMeeting.board_permission_mode ?? 'coach_only',
+                hostName: existingSquad.find((p: any) => p.role === 'Head Coach')?.name || 'Head Coach',
+                participants: existingSquad,
               },
               participant: {
-                id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `p_${Date.now()}`,
+                id: guestParticipantId,
                 displayName: payload.displayName,
                 role: payload.role || 'player',
                 admissionStatus: 'admitted',
@@ -452,22 +500,59 @@ export const api = {
   // 3. Get meeting info
   async getMeeting(meetingId: string) {
     const res = await fetch(`/api/meetings/${meetingId}`).catch(() => null);
-    if (!res || !res.ok) {
-      return {
-        id: meetingId,
-        code: 'DFC-LIVE',
-        title: 'Dream FC Tactical Session',
-        status: 'active',
-        boardPermissionMode: 'coach_only',
-        allowChat: true,
-        participants: [],
-      };
+    if (res && res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data && Array.isArray(data.participants) && data.participants.length > 0) {
+        return data;
+      }
     }
-    return res.json();
+
+    const supabase = getClientSupabase();
+    if (supabase) {
+      try {
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(meetingId);
+        let mQuery = supabase.from('meetings').select('*');
+        if (isUuid) {
+          mQuery = mQuery.eq('id', meetingId);
+        } else {
+          mQuery = mQuery.eq('code', meetingId);
+        }
+        const { data: dbM } = await mQuery.maybeSingle();
+        if (dbM) {
+          const { data: dbParts } = await supabase.from('meeting_participants').select('*').eq('meeting_id', dbM.id);
+          const parts = (dbParts || []).map((p: any) => ({
+            id: p.id,
+            name: p.display_name,
+            role: p.role === 'host' ? 'Head Coach' : p.role,
+            isMuted: p.is_muted ?? false,
+            canEditBoard: p.can_edit_board ?? false,
+          }));
+          return {
+            id: dbM.id,
+            code: dbM.code,
+            title: dbM.title,
+            status: dbM.status,
+            boardPermissionMode: dbM.board_permission_mode,
+            allowChat: dbM.allow_chat ?? true,
+            participants: parts,
+          };
+        }
+      } catch {}
+    }
+
+    return {
+      id: meetingId,
+      code: 'DFC-LIVE',
+      title: 'Dream FC Tactical Session',
+      status: 'active',
+      boardPermissionMode: 'coach_only',
+      allowChat: true,
+      participants: [],
+    };
   },
 
   // 4. Request LiveKit token
-  async getLiveKitToken(meetingId: string, participantInfo?: { id?: string; name?: string; isHost?: boolean }) {
+  async getLiveKitToken(meetingId: string, participantInfo?: { id?: string; name?: string; isHost?: boolean; meetingCode?: string }) {
     try {
       const res = await fetch(`/api/meetings/${meetingId}/token`, {
         method: 'POST',
@@ -480,6 +565,7 @@ export const api = {
           participantId: participantInfo?.id,
           participantName: participantInfo?.name,
           isHost: participantInfo?.isHost,
+          meetingCode: participantInfo?.meetingCode,
         }),
       });
       if (res.ok) {
@@ -489,26 +575,74 @@ export const api = {
       console.warn('[API] getLiveKitToken fetch warning:', err);
     }
 
+    const fallbackUrl = (import.meta.env.VITE_LIVEKIT_URL || '').trim() || 'wss://dream-fc-tactical-zone-n7tg780s.livekit.cloud';
     return {
       token: 'client_guest_token_' + Date.now(),
-      serverUrl: 'wss://dreamfc-tactical.livekit.cloud',
+      serverUrl: fallbackUrl,
     };
   },
 
   // 5. Get canonical board
   async getBoard(meetingId: string) {
     const res = await fetch(`/api/meetings/${meetingId}/board`).catch(() => null);
-    if (!res || !res.ok) return null;
-    return res.json();
+    if (res && res.ok) {
+      return res.json().catch(() => null);
+    }
+
+    const supabase = getClientSupabase();
+    if (supabase) {
+      try {
+        const { data: dbB } = await supabase.from('tactical_boards').select('*').eq('meeting_id', meetingId).maybeSingle();
+        if (dbB) {
+          return {
+            revision: dbB.revision,
+            boardState: dbB.board_state,
+            updatedAt: dbB.updated_at,
+          };
+        }
+      } catch {}
+    }
+
+    return null;
   },
 
   // 6. Submit board operation
   async sendBoardOperation(meetingId: string, operation: { type: string; payload: any }) {
+    // Send to backend endpoint
     const res = await fetch(`/api/meetings/${meetingId}/board/operations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(operation),
     }).catch(() => null);
+
+    // Also update Supabase directly if client configured
+    const supabase = getClientSupabase();
+    if (supabase) {
+      try {
+        const { data: currentBoard } = await supabase.from('tactical_boards').select('*').eq('meeting_id', meetingId).maybeSingle();
+        if (currentBoard) {
+          const nextRevision = (currentBoard.revision || 1) + 1;
+          let nextState = currentBoard.board_state || {};
+          if (operation.type === 'set_formation') {
+            nextState = { ...nextState, formation: operation.payload.formation };
+          } else if (operation.type === 'set_paths') {
+            nextState = { ...nextState, paths: operation.payload.paths };
+          } else if (operation.type === 'add_path') {
+            nextState = { ...nextState, paths: [...(nextState.paths || []), operation.payload.path] };
+          } else if (operation.type === 'clear_paths') {
+            nextState = { ...nextState, paths: [] };
+          } else if (operation.type === 'reset_board' && operation.payload?.boardState) {
+            nextState = { ...nextState, ...operation.payload.boardState };
+          }
+          await supabase.from('tactical_boards').update({
+            board_state: nextState,
+            revision: nextRevision,
+            updated_at: new Date().toISOString(),
+          }).eq('meeting_id', meetingId);
+        }
+      } catch {}
+    }
+
     if (!res || !res.ok) {
       return { success: true };
     }

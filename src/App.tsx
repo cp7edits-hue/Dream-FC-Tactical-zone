@@ -257,6 +257,72 @@ export default function App() {
     };
   }, [meeting?.id, boardRevision, currentFormation, isHost, currentUser.id]);
 
+  // --- CROSS-DEVICE PARTICIPANT & BOARD RECONCILIATION ---
+  useEffect(() => {
+    if (!meeting?.id) return;
+
+    // Periodically reconcile participants and board state across serverless containers / devices
+    const pollInterval = setInterval(async () => {
+      try {
+        const info = await api.getMeeting(meeting.id);
+        if (info && Array.isArray(info.participants) && info.participants.length > 0) {
+          setMeeting((prev) => {
+            if (!prev) return null;
+            const updatedList = [...prev.participants];
+            let changed = false;
+
+            info.participants.forEach((p: any) => {
+              const pName = p.name || p.displayName;
+              const pId = p.id;
+              const idx = updatedList.findIndex((item) => item.id === pId || item.name === pName);
+              if (idx === -1) {
+                updatedList.push({
+                  id: pId,
+                  name: pName,
+                  role: p.role === 'host' ? 'Head Coach' : p.role,
+                  isMuted: p.isMuted ?? false,
+                  isSpeaking: false,
+                  avatarColor: p.role === 'Head Coach' || p.role === 'host' ? 'bg-[#a3e635] text-slate-950' : 'bg-blue-600 text-white',
+                });
+                changed = true;
+              } else {
+                if (updatedList[idx].role !== p.role || updatedList[idx].isMuted !== p.isMuted) {
+                  updatedList[idx] = {
+                    ...updatedList[idx],
+                    role: p.role === 'host' ? 'Head Coach' : p.role,
+                    isMuted: p.isMuted ?? updatedList[idx].isMuted,
+                  };
+                  changed = true;
+                }
+              }
+            });
+
+            return changed ? { ...prev, participants: updatedList } : prev;
+          });
+        }
+
+        const board = await api.getBoard(meeting.id);
+        if (board && board.revision > boardRevision) {
+          setBoardRevision(board.revision);
+          const state = board.boardState || board.board_state;
+          if (state) {
+            if (state.formation && state.formation !== currentFormation) {
+              setCurrentFormation(state.formation);
+            }
+            if (state.home_players) setHomePlayers(state.home_players);
+            if (state.away_players) setAwayPlayers(state.away_players);
+            if (state.paths) setPaths(state.paths);
+            if (state.ball) setBallPosition(state.ball);
+          }
+        }
+      } catch {}
+    }, 2500);
+
+    return () => {
+      clearInterval(pollInterval);
+    };
+  }, [meeting?.id, boardRevision, currentFormation]);
+
   // --- ACTIONS ---
 
   const handleSelectFormation = (f: FormationType) => {

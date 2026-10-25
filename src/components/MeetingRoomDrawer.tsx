@@ -467,6 +467,7 @@ export const MeetingRoomDrawer = ({
           {/* LiveKit & WebRTC Media Box in Full Grid Mode */}
           <LiveKitVideoRoom
             meetingId={meeting.id}
+            meetingCode={meeting.code}
             isHost={isHost}
             participantId={myParticipantId}
             participantName={myParticipantName}

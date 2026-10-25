@@ -594,22 +594,29 @@ apiRouter.get('/meetings/:meetingId', async (req: Request, res: Response): Promi
     canEditBoard: p.can_edit_board,
   }));
 
-  if (participants.length === 0 && supabase) {
+  if (supabase) {
     try {
       const { data: dbParticipants } = await supabase
         .from('meeting_participants')
         .select('*')
         .eq('meeting_id', meeting.id);
 
-      if (dbParticipants) {
-        participants = dbParticipants.map((p) => ({
-          id: p.id,
-          name: p.display_name,
-          role: p.role === 'host' ? 'Head Coach' : p.role,
-          admissionStatus: p.admission_status,
-          isMuted: p.is_muted,
-          canEditBoard: p.can_edit_board,
-        }));
+      if (dbParticipants && dbParticipants.length > 0) {
+        const participantMap = new Map<string, any>();
+        dbParticipants.forEach((p) => {
+          participantMap.set(p.id, {
+            id: p.id,
+            name: p.display_name,
+            role: p.role === 'host' ? 'Head Coach' : p.role,
+            admissionStatus: p.admission_status,
+            isMuted: p.is_muted,
+            canEditBoard: p.can_edit_board,
+          });
+        });
+        participants.forEach((p) => {
+          participantMap.set(p.id, p);
+        });
+        participants = Array.from(participantMap.values());
       }
     } catch {}
   }
@@ -691,8 +698,13 @@ apiRouter.post('/meetings/:meetingId/token', async (req: Request, res: Response)
     return;
   }
 
+  const meetingCode = req.body?.meetingCode;
   // Ensure deterministic room name: all participants for the same meeting use the exact same room
-  const normalizedCode = meeting?.code ? meeting.code.toUpperCase().trim() : meetingId.toUpperCase().trim();
+  const normalizedCode = meeting?.code
+    ? meeting.code.toUpperCase().trim()
+    : meetingCode
+    ? String(meetingCode).toUpperCase().trim()
+    : meetingId.toUpperCase().trim();
   const roomName = `meeting_${normalizedCode}`;
 
   try {
@@ -751,14 +763,26 @@ apiRouter.post('/meetings/:meetingId/leave', (req: Request, res: Response): void
 // -----------------------------------------------------------------------------
 // 5. CANONICAL TACTICAL BOARD STATE
 // -----------------------------------------------------------------------------
-apiRouter.get('/meetings/:meetingId/board', (req: Request, res: Response): void => {
-  const participant = getSessionParticipant(req);
-  if (!participant || participant.meeting_id !== req.params.meetingId) {
-    res.status(403).json({ error: 'Unauthorized' });
-    return;
+apiRouter.get('/meetings/:meetingId/board', async (req: Request, res: Response): Promise<void> => {
+  const meetingId = req.params.meetingId;
+  let board = store.boards.get(meetingId);
+
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      const { data: dbBoard } = await supabase
+        .from('tactical_boards')
+        .select('*')
+        .eq('meeting_id', meetingId)
+        .maybeSingle();
+
+      if (dbBoard && (!board || dbBoard.revision >= (board.revision || 1))) {
+        board = dbBoard;
+        store.boards.set(meetingId, dbBoard);
+      }
+    } catch {}
   }
 
-  const board = store.boards.get(req.params.meetingId);
   if (!board) {
     res.status(404).json({ error: 'Tactical board not found' });
     return;
@@ -774,7 +798,7 @@ apiRouter.get('/meetings/:meetingId/board', (req: Request, res: Response): void 
 // -----------------------------------------------------------------------------
 // 6. BOARD OPERATIONS (Move marker, set formation, draw path)
 // -----------------------------------------------------------------------------
-apiRouter.post(['/meetings/:meetingId/board/operations', '/meetings/:meetingId/operations'], (req: Request, res: Response): void => {
+apiRouter.post(['/meetings/:meetingId/board/operations', '/meetings/:meetingId/operations'], async (req: Request, res: Response): Promise<void> => {
   const participant = getSessionParticipant(req);
   if (!participant || participant.meeting_id !== req.params.meetingId) {
     res.status(403).json({ error: 'Unauthorized' });
@@ -886,6 +910,23 @@ apiRouter.post(['/meetings/:meetingId/board/operations', '/meetings/:meetingId/o
   board.revision += 1;
   board.updated_by = participant.authenticated_user_id || participant.id;
   board.updated_at = new Date().toISOString();
+
+  // Persist to Supabase if configured for multi-container synchronization
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase
+        .from('tactical_boards')
+        .update({
+          board_state: board.board_state,
+          revision: board.revision,
+          updated_at: board.updated_at,
+        })
+        .eq('meeting_id', meeting.id);
+    } catch (e: any) {
+      console.warn('[Supabase] Warning updating tactical board:', e?.message);
+    }
+  }
 
   // Broadcast to all participants via realtime SSE
   store.broadcastToMeeting(meeting.id, 'board_updated', {

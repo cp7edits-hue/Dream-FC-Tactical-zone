@@ -37,6 +37,7 @@ export interface RemoteFeed {
 
 interface LiveKitVideoRoomProps {
   meetingId: string;
+  meetingCode?: string;
   isHost: boolean;
   participantId?: string;
   participantName: string;
@@ -254,6 +255,7 @@ const RemoteVideoTile = memo(
 // =============================================================================
 export const LiveKitVideoRoom = ({
   meetingId,
+  meetingCode,
   isHost,
   participantId,
   participantName,
@@ -361,10 +363,16 @@ export const LiveKitVideoRoom = ({
         }
       });
 
-      for (const [id] of next.entries()) {
-        const stillInMeeting = remoteParticipants.some((p) => p.id === id || p.name === id);
-        if (!stillInMeeting) {
-          next.delete(id);
+      for (const [id, feed] of next.entries()) {
+        // Never remove participants who have active media tracks or are connected in the LiveKit room!
+        if (feed.videoTrack || feed.audioTrack) continue;
+        if (livekitRoomRef.current?.remoteParticipants?.has(id)) continue;
+
+        if (remoteParticipants.length > 0) {
+          const stillInMeeting = remoteParticipants.some((p) => p.id === id || p.name === id || p.name === feed.participantName);
+          if (!stillInMeeting) {
+            next.delete(id);
+          }
         }
       }
 
@@ -579,6 +587,7 @@ export const LiveKitVideoRoom = ({
         id: myIdentity,
         name: participantName,
         isHost,
+        meetingCode,
       });
 
       const isLiveKitConfigured =
@@ -763,7 +772,7 @@ export const LiveKitVideoRoom = ({
       console.warn('[LiveKitVideoRoom] Media token notice:', tokenErr);
       if (stream) setConnectionStatus('connected_webrtc');
     }
-  }, [meetingId, myIdentity, participantName, isHost, stopLocalTracks, cleanupPeerConnections, isMuted, isVideoEnabled, externalToggleVideo]);
+  }, [meetingId, meetingCode, myIdentity, participantName, isHost, stopLocalTracks, cleanupPeerConnections, isMuted, isVideoEnabled, externalToggleVideo]);
 
   // Run initialization on mount & cleanup on unmount
   useEffect(() => {
