@@ -7,6 +7,8 @@ import { apiRouter } from './routes';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+import { verifySupabaseTables, isSupabaseConfigured } from './supabase';
+
 export function createApp(): Express {
   const app = express();
 
@@ -39,13 +41,29 @@ export function createApp(): Express {
   app.use('/api', apiRouter);
   app.use(apiRouter);
 
-  // Health check endpoint (accessible at both /api/health and /health)
-  const healthHandler = (_req: express.Request, res: express.Response) => {
+  // Health check endpoint with live database schema diagnostic
+  const healthHandler = async (_req: express.Request, res: express.Response) => {
+    let dbStatus: any = { configured: false, ready: false };
+    try {
+      if (isSupabaseConfigured()) {
+        const verify = await verifySupabaseTables();
+        dbStatus = {
+          configured: true,
+          ready: verify.ok,
+          message: verify.message,
+          migrationFile: 'migrations/000_complete_supabase_setup.sql',
+        };
+      }
+    } catch (e: any) {
+      dbStatus = { configured: true, ready: false, error: e?.message };
+    }
+
     res.json({
       status: 'ok',
       service: 'Dream FC Tactical Zone API',
       timestamp: new Date().toISOString(),
       platform: process.env.VERCEL ? 'vercel-serverless' : 'node-server',
+      database: dbStatus,
     });
   };
   app.get('/api/health', healthHandler);

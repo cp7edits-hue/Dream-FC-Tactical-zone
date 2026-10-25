@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Video, LogIn, Shield, Users, Copy, Check, Lock, Users2 } from 'lucide-react';
+import { X, Video, LogIn, Shield, Users, Copy, Check, Lock, Users2, AlertTriangle } from 'lucide-react';
 import { api } from '../services/api';
 
 interface MeetingModalProps {
@@ -26,15 +26,21 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
   // Status & errors
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [migrationError, setMigrationError] = useState<{
+    message: string;
+    details?: string;
+    sqlFile?: string;
+  } | null>(null);
   const [createdResult, setCreatedResult] = useState<{ code: string; passcode: string; warning?: string } | null>(null);
   const [copied, setCopied] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleCreateSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreateSubmit = async (e?: React.FormEvent, localFallback = false) => {
+    if (e) e.preventDefault();
     setLoading(true);
     setErrorMsg(null);
+    setMigrationError(null);
 
     try {
       const res = await api.createMeeting({
@@ -43,6 +49,7 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
         boardPermissionMode: boardMode,
         maxParticipants,
         lobbyEnabled,
+        allowLocalFallback: localFallback,
       });
 
       setCreatedResult({
@@ -53,7 +60,15 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
 
       onSuccess(res.meeting, res.participant);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to create meeting');
+      if (err.code === 'DATABASE_MIGRATION_REQUIRED' || err.message?.includes('PGRST205') || err.message?.includes('schema cache')) {
+        setMigrationError({
+          message: err.message,
+          details: err.details,
+          sqlFile: err.sqlFile || 'migrations/000_complete_supabase_setup.sql',
+        });
+      } else {
+        setErrorMsg(err.message || 'Failed to create meeting');
+      }
     } finally {
       setLoading(false);
     }
@@ -133,6 +148,42 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
         {errorMsg && (
           <div className="mb-4 p-3 rounded-xl bg-rose-950/80 border border-rose-800 text-rose-300 text-xs">
             {errorMsg}
+          </div>
+        )}
+
+        {migrationError && (
+          <div className="mb-4 p-4 rounded-xl bg-amber-950/90 border border-amber-600/70 text-amber-200 text-xs space-y-2.5 shadow-lg">
+            <div className="flex items-center gap-2 font-bold text-amber-300">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Database Schema Setup Required</span>
+            </div>
+            <p className="text-[11px] text-amber-200/90 leading-relaxed">
+              Table <code className="bg-amber-900/60 px-1 py-0.5 rounded text-amber-300 font-mono">public.meetings</code> is not created yet in your Supabase database. For multi-device persistence across phone and laptop:
+            </p>
+            <div className="p-2 rounded-lg bg-slate-950 border border-amber-900/50 font-mono text-[10px] text-slate-300 select-all">
+              {migrationError.sqlFile}
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(migrationError.sqlFile || 'migrations/000_complete_supabase_setup.sql');
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copied ? 'Copied Path!' : 'Copy Migration Path'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleCreateSubmit(undefined, true)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-[11px] border border-slate-700 transition-colors cursor-pointer"
+              >
+                Launch Local-Only Session
+              </button>
+            </div>
           </div>
         )}
 

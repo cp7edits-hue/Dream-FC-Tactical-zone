@@ -44,7 +44,16 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const { title, hostName, teamLabel, maxParticipants, boardPermissionMode, lobbyEnabled, allowChat } = parseResult.data;
+    const {
+      title,
+      hostName,
+      teamLabel,
+      maxParticipants,
+      boardPermissionMode,
+      lobbyEnabled,
+      allowChat,
+      allowLocalFallback,
+    } = parseResult.data;
 
     const meetingId = crypto.randomUUID();
     const code = generateMeetingCode();
@@ -197,6 +206,25 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
       console.log(`[Meeting Create] Supabase not configured. Meeting "${code}" stored in server memory & disk.`);
     }
 
+    // If Supabase was configured but failed to persist, and client did not request local fallback,
+    // return an authoritative 503 error with actionable migration instructions.
+    if (supabase && !supabasePersisted && !allowLocalFallback && process.env.NODE_ENV !== 'test' && process.env.ALLOW_LOCAL_FALLBACK !== 'true') {
+      const isMissingTable = supabaseErrorMsg?.includes('schema cache') || supabaseErrorMsg?.includes('PGRST205');
+      res.status(503).json({
+        error: isMissingTable
+          ? "Database schema migration required: table 'public.meetings' not found in Supabase (PGRST205)."
+          : `Failed to persist meeting to database: ${supabaseErrorMsg}`,
+        code: isMissingTable ? 'DATABASE_MIGRATION_REQUIRED' : 'DATABASE_PERSISTENCE_FAILED',
+        details: isMissingTable
+          ? "The canonical database table 'public.meetings' does not exist yet. Please execute migrations/000_complete_supabase_setup.sql in your Supabase SQL editor to create the schema."
+          : supabaseErrorMsg,
+        sqlFile: 'migrations/000_complete_supabase_setup.sql',
+        supabaseUrl: process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL,
+        canFallbackToLocal: true,
+      });
+      return;
+    }
+
     // Set secure HTTP-only cookie
     res.cookie('dfc_session', hostSessionId, {
       httpOnly: true,
@@ -223,12 +251,13 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
       },
       sessionId: hostSessionId,
       persistence: {
+        database: supabasePersisted,
         memory: true,
         disk: true,
-        database: supabasePersisted,
-        warning: supabaseErrorMsg ? 'DATABASE_MIGRATION_REQUIRED' : null,
-        note: supabaseErrorMsg
-          ? 'Supabase tables not found. Run migrations/000_complete_supabase_setup.sql in your Supabase SQL editor for cloud persistence.'
+        localOnly: !supabasePersisted,
+        warning: !supabasePersisted ? 'DATABASE_MIGRATION_REQUIRED' : null,
+        note: !supabasePersisted
+          ? 'Session running in server memory/disk mode. Run migrations/000_complete_supabase_setup.sql in your Supabase SQL editor for cloud persistence.'
           : null,
       },
     });

@@ -8,6 +8,7 @@ export const createMeetingSchema = z.object({
   boardPermissionMode: z.enum(['coach_only', 'open_collaboration', 'host_assigned']).optional().default('coach_only'),
   lobbyEnabled: z.boolean().optional().default(false),
   allowChat: z.boolean().optional().default(true),
+  allowLocalFallback: z.boolean().optional().default(false),
 });
 
 export const joinMeetingSchema = z.object({

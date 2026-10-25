@@ -15,7 +15,7 @@ export function getClientSupabase(): SupabaseClient | null {
       url = rawUrl.replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '');
     }
   }
-  const key = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+  const key = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim().replace(/^['"]|['"]$/g, '');
 
   if (!url || !key || key.includes('YOUR_SUPABASE_')) {
     return null;

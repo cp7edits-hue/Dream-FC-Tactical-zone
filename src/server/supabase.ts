@@ -15,6 +15,13 @@ export function cleanSupabaseUrl(rawUrl?: string): string | null {
   }
 }
 
+export function cleanKey(rawKey?: string): string | null {
+  if (!rawKey) return null;
+  const trimmed = rawKey.trim().replace(/^['"]|['"]$/g, '');
+  if (!trimmed || trimmed.includes('YOUR_SUPABASE_')) return null;
+  return trimmed;
+}
+
 export function getSupabase(): SupabaseClient | null {
   if (supabaseClient) return supabaseClient;
 
@@ -22,12 +29,13 @@ export function getSupabase(): SupabaseClient | null {
   const url = cleanSupabaseUrl(rawUrl);
 
   // Prefer service role key on the server (bypasses RLS for secure server operations)
-  const key =
+  const rawKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
     process.env.SUPABASE_ANON_KEY ||
     process.env.VITE_SUPABASE_ANON_KEY;
+  const key = cleanKey(rawKey);
 
-  if (!url || !key || key.includes('YOUR_SUPABASE_')) {
+  if (!url || !key) {
     return null;
   }
 

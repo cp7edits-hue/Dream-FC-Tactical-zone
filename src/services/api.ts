@@ -8,6 +8,7 @@ export interface CreateMeetingPayload {
   maxParticipants?: number;
   boardPermissionMode?: 'coach_only' | 'open_collaboration' | 'host_assigned';
   lobbyEnabled?: boolean;
+  allowLocalFallback?: boolean;
 }
 
 export interface JoinMeetingPayload {
@@ -61,9 +62,10 @@ async function clientFallbackCreateMeeting(payload: CreateMeetingPayload) {
 
   // Persist directly to Supabase if client credentials exist
   const supabase = getClientSupabase();
+  let directSavedToDb = false;
   if (supabase) {
     try {
-      await supabase.from('meetings').insert({
+      const { error: mErr } = await supabase.from('meetings').insert({
         id: meetingId,
         code,
         title: meetingData.title,
@@ -76,17 +78,43 @@ async function clientFallbackCreateMeeting(payload: CreateMeetingPayload) {
         lobby_enabled: payload.lobbyEnabled || false,
       });
 
-      await supabase.from('meeting_participants').insert({
-        id: hostParticipantId,
-        meeting_id: meetingId,
-        authenticated_user_id: null,
-        session_identifier: sessionId,
-        display_name: participantData.displayName,
-        role: 'host',
-        admission_status: 'admitted',
-        is_muted: false,
-        can_edit_board: true,
-      });
+      if (mErr) {
+        console.error('[Client Supabase] Error persisting meeting directly:', mErr);
+      } else {
+        directSavedToDb = true;
+      }
+
+      try {
+        await supabase.from('tactical_boards').insert({
+          id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `b_${Date.now()}`,
+          meeting_id: meetingId,
+          board_state: {
+            formation: '4-3-3',
+            field_type: 'full_pitch',
+            home_players: [],
+            away_players: [],
+            ball: { x: 0, z: 0 },
+            paths: [],
+            notes: ['1. Tactical briefing', '2. Solid defensive shape'],
+          },
+          revision: 1,
+          updated_by: null,
+        });
+      } catch {}
+
+      try {
+        await supabase.from('meeting_participants').insert({
+          id: hostParticipantId,
+          meeting_id: meetingId,
+          authenticated_user_id: null,
+          session_identifier: sessionId,
+          display_name: participantData.displayName,
+          role: 'host',
+          admission_status: 'admitted',
+          is_muted: false,
+          can_edit_board: true,
+        });
+      } catch {}
     } catch (e) {
       console.warn('[Client Supabase] Warning persisting meeting directly:', e);
     }
@@ -108,6 +136,12 @@ async function clientFallbackCreateMeeting(payload: CreateMeetingPayload) {
     meeting: meetingData,
     participant: participantData,
     sessionId,
+    persistence: {
+      database: directSavedToDb,
+      clientDirect: true,
+      memory: false,
+      disk: false,
+    },
   };
 }
 
@@ -251,15 +285,42 @@ export const api = {
         return data;
       }
 
+      if (res.status >= 500) {
+        const clientSupabase = getClientSupabase();
+        if (clientSupabase) {
+          console.warn('[API] Server returned 500. Attempting direct client Supabase persistence...');
+          try {
+            const fallbackResult = await clientFallbackCreateMeeting(payload);
+            if (fallbackResult.persistence.database) {
+              return fallbackResult;
+            }
+          } catch (e) {
+            console.warn('[API] Direct client Supabase fallback also failed:', e);
+          }
+        }
+      }
+
       const serverError = data?.error || data?.message || (rawText ? `Server returned (${res.status}): ${rawText.slice(0, 150)}` : '');
       const details = data?.details ? (typeof data.details === 'string' ? data.details : JSON.stringify(data.details)) : '';
-      if (serverError) {
-        throw new Error(details ? `${serverError} — ${details}` : serverError);
-      }
-      throw new Error(`Server returned HTTP ${res.status}. Failed to persist meeting to backend.`);
+      const errMsg = details && !serverError.includes(details) ? `${serverError} — ${details}` : (serverError || `Server returned HTTP ${res.status}. Failed to persist meeting.`);
+      const errObj: any = new Error(errMsg);
+      errObj.code = data?.code;
+      errObj.status = res.status;
+      errObj.sqlFile = data?.sqlFile;
+      errObj.canFallbackToLocal = data?.canFallbackToLocal;
+      throw errObj;
     } catch (networkErr: any) {
       if (networkErr.message && !networkErr.message.includes('fetch') && !networkErr.message.includes('Failed to fetch')) {
         throw networkErr;
+      }
+      const clientSupabase = getClientSupabase();
+      if (clientSupabase) {
+        try {
+          const fallbackResult = await clientFallbackCreateMeeting(payload);
+          if (fallbackResult.persistence.database) {
+            return fallbackResult;
+          }
+        } catch {}
       }
       console.error('[API] /api/meetings network error:', networkErr);
       throw new Error('Unable to connect to strategy server. Please verify your internet connection and try again.');
