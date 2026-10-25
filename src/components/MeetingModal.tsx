@@ -26,7 +26,7 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
   // Status & errors
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [createdResult, setCreatedResult] = useState<{ code: string; passcode: string } | null>(null);
+  const [createdResult, setCreatedResult] = useState<{ code: string; passcode: string; warning?: string } | null>(null);
   const [copied, setCopied] = useState(false);
 
   if (!isOpen) return null;
@@ -48,6 +48,7 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
       setCreatedResult({
         code: res.meeting.code,
         passcode: res.meeting.passcode,
+        warning: res.persistence?.note || (res.persistence?.database === false ? 'Database table migration pending. Session active on server.' : undefined),
       });
 
       onSuccess(res.meeting, res.participant);
@@ -170,6 +171,13 @@ export const MeetingModal = ({ isOpen, mode, onClose, onSuccess }: MeetingModalP
                     {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                     <span>{copied ? 'Copied to Clipboard' : 'Copy Meeting Invite'}</span>
                   </button>
+
+                  {createdResult.warning && (
+                    <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 leading-relaxed">
+                      <span className="font-semibold block text-amber-200">Database Setup Notice:</span>
+                      {createdResult.warning}
+                    </div>
+                  )}
                 </div>
 
                 <button

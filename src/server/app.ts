@@ -35,22 +35,35 @@ export function createApp(): Express {
     // ignore in serverless
   }
 
-  // Mount API endpoints
+  // Mount API endpoints on both /api and root for maximum proxy compatibility
   app.use('/api', apiRouter);
+  app.use(apiRouter);
 
-  // Health check endpoint
-  app.get('/api/health', (_req, res) => {
+  // Health check endpoint (accessible at both /api/health and /health)
+  const healthHandler = (_req: express.Request, res: express.Response) => {
     res.json({
       status: 'ok',
       service: 'Dream FC Tactical Zone API',
       timestamp: new Date().toISOString(),
       platform: process.env.VERCEL ? 'vercel-serverless' : 'node-server',
     });
-  });
+  };
+  app.get('/api/health', healthHandler);
+  app.get('/health', healthHandler);
 
   // 404 handler for API routes
-  app.all('/api/*', (_req, res) => {
+  app.all(['/api/*', '/meetings', '/meetings/*'], (_req, res) => {
     res.status(404).json({ error: 'API endpoint not found', code: 'ENDPOINT_NOT_FOUND' });
+  });
+
+  // Global Express JSON error handler (prevents unformatted HTML 500 pages)
+  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[Express Global Error]:', err);
+    res.status(err.status || 500).json({
+      error: err?.message || 'Internal server error occurred',
+      code: err?.code || 'INTERNAL_SERVER_ERROR',
+      status: err?.status || 500,
+    });
   });
 
   return app;

@@ -215,11 +215,35 @@ export const api = {
 
       const contentType = res.headers.get('content-type') || '';
       let data: any = null;
+      let rawText = '';
       if (contentType.includes('application/json')) {
         data = await res.json().catch(() => null);
+      } else {
+        rawText = await res.text().catch(() => '');
       }
 
       if (res.ok && data?.success) {
+        // Dual-write to client Supabase instance if configured to ensure immediate availability
+        const clientSupabase = getClientSupabase();
+        if (clientSupabase && data.meeting) {
+          try {
+            Promise.resolve(
+              clientSupabase.from('meetings').insert({
+                id: data.meeting.id,
+                code: data.meeting.code,
+                title: data.meeting.title,
+                host_user_id: null,
+                team_label: payload.teamLabel || 'Dream FC',
+                status: 'active',
+                access_secret_hash: data.meeting.passcode,
+                max_participants: data.meeting.maxParticipants || 25,
+                board_permission_mode: data.meeting.boardPermissionMode || 'coach_only',
+                lobby_enabled: payload.lobbyEnabled || false,
+              })
+            ).catch(() => {});
+          } catch {}
+        }
+
         try {
           localStorage.setItem(`dfc_meeting_${data.meeting.code}`, JSON.stringify(data));
           localStorage.setItem(`dfc_meeting_${data.meeting.id}`, JSON.stringify(data));
@@ -227,13 +251,14 @@ export const api = {
         return data;
       }
 
-      const serverError = data?.error || data?.message || '';
+      const serverError = data?.error || data?.message || (rawText ? `Server returned (${res.status}): ${rawText.slice(0, 150)}` : '');
+      const details = data?.details ? (typeof data.details === 'string' ? data.details : JSON.stringify(data.details)) : '';
       if (serverError) {
-        throw new Error(serverError);
+        throw new Error(details ? `${serverError} — ${details}` : serverError);
       }
-      throw new Error(`Server returned error (${res.status}). Failed to persist meeting to shared backend.`);
+      throw new Error(`Server returned HTTP ${res.status}. Failed to persist meeting to backend.`);
     } catch (networkErr: any) {
-      if (networkErr.message && !networkErr.message.includes('fetch')) {
+      if (networkErr.message && !networkErr.message.includes('fetch') && !networkErr.message.includes('Failed to fetch')) {
         throw networkErr;
       }
       console.error('[API] /api/meetings network error:', networkErr);

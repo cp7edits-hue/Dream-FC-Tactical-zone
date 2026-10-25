@@ -222,6 +222,15 @@ apiRouter.post('/meetings', async (req: Request, res: Response): Promise<void> =
         canEditBoard: true,
       },
       sessionId: hostSessionId,
+      persistence: {
+        memory: true,
+        disk: true,
+        database: supabasePersisted,
+        warning: supabaseErrorMsg ? 'DATABASE_MIGRATION_REQUIRED' : null,
+        note: supabaseErrorMsg
+          ? 'Supabase tables not found. Run migrations/000_complete_supabase_setup.sql in your Supabase SQL editor for cloud persistence.'
+          : null,
+      },
     });
   } catch (err: any) {
     console.error('[API /meetings] Error during meeting creation:', err);
