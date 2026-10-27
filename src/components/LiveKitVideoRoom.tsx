@@ -8,9 +8,12 @@ import {
   AlertTriangle,
   RotateCcw,
   Volume2,
+  VolumeX,
   Users,
   Shield,
-  Maximize2,
+  Activity,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { api } from '../services/api';
 
@@ -53,6 +56,67 @@ interface LiveKitVideoRoomProps {
 type MediaErrorType = 'permission_denied' | 'not_found' | 'hardware_in_use' | 'unknown' | null;
 
 // =============================================================================
+// PERSISTENT AUDIO ELEMENT
+// Mounts directly in a hidden DOM container to guarantee audio playback
+// is never disrupted when tabs change, drawers collapse, or elements re-render.
+// =============================================================================
+const PersistentAudioFeed = memo(
+  ({
+    feed,
+    onAutoplayBlocked,
+  }: {
+    feed: RemoteFeed;
+    onAutoplayBlocked: () => void;
+  }) => {
+    const audioRef = useRef<HTMLAudioElement>(null);
+
+    useEffect(() => {
+      const audioEl = audioRef.current;
+      if (!audioEl || !feed.audioTrack) return;
+
+      if (typeof feed.audioTrack.attach === 'function') {
+        try {
+          feed.audioTrack.attach(audioEl);
+          audioEl.play().catch((err: any) => {
+            if (err.name === 'NotAllowedError') {
+              onAutoplayBlocked();
+            }
+          });
+        } catch (err) {
+          console.warn('[PersistentAudioFeed] Attach notice:', err);
+        }
+        return () => {
+          try {
+            if (typeof feed.audioTrack.detach === 'function') {
+              feed.audioTrack.detach(audioEl);
+            }
+          } catch {}
+        };
+      } else if (feed.audioTrack instanceof MediaStreamTrack) {
+        audioEl.srcObject = new MediaStream([feed.audioTrack]);
+        audioEl.play().catch((err: any) => {
+          if (err.name === 'NotAllowedError') {
+            onAutoplayBlocked();
+          }
+        });
+        return () => {
+          audioEl.srcObject = null;
+        };
+      }
+    }, [feed.audioTrack, onAutoplayBlocked]);
+
+    return (
+      <audio
+        ref={audioRef}
+        autoPlay
+        playsInline
+        data-participant={feed.participantId}
+      />
+    );
+  }
+);
+
+// =============================================================================
 // INDIVIDUAL REMOTE PARTICIPANT VIDEO TILE (FULL & COMPACT)
 // =============================================================================
 const RemoteVideoTile = memo(
@@ -66,7 +130,6 @@ const RemoteVideoTile = memo(
     onClick?: () => void;
   }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
-    const audioRef = useRef<HTMLAudioElement>(null);
 
     // Attach / Detach Video Track
     useEffect(() => {
@@ -96,34 +159,6 @@ const RemoteVideoTile = memo(
       }
     }, [feed.videoTrack]);
 
-    // Attach / Detach Audio Track (Always mounted to ensure audio is heard!)
-    useEffect(() => {
-      const audioEl = audioRef.current;
-      if (!audioEl || !feed.audioTrack) return;
-
-      if (typeof feed.audioTrack.attach === 'function') {
-        try {
-          feed.audioTrack.attach(audioEl);
-          audioEl.play().catch(() => {});
-        } catch (err) {
-          console.warn('[RemoteVideoTile] Audio attach notice:', err);
-        }
-        return () => {
-          try {
-            if (typeof feed.audioTrack.detach === 'function') {
-              feed.audioTrack.detach(audioEl);
-            }
-          } catch {}
-        };
-      } else if (feed.audioTrack instanceof MediaStreamTrack) {
-        audioEl.srcObject = new MediaStream([feed.audioTrack]);
-        audioEl.play().catch(() => {});
-        return () => {
-          audioEl.srcObject = null;
-        };
-      }
-    }, [feed.audioTrack]);
-
     const hasActiveVideo = !!feed.videoTrack && !feed.isVideoMuted;
 
     // Compact Thumbnail Mode (For minimized top meeting bar)
@@ -138,13 +173,16 @@ const RemoteVideoTile = memo(
           }`}
           title={`${feed.participantName} (${feed.isHost ? 'Coach' : 'Squad'}) - Click to expand`}
         >
+          {/* CRITICAL: Video is muted to ensure mobile browsers allow autoplay */}
           <video
             ref={videoRef}
             autoPlay
             playsInline
-            className={`w-full h-full object-cover ${hasActiveVideo ? 'opacity-100' : 'opacity-0 hidden'}`}
+            muted
+            className={`w-full h-full object-cover ${
+              hasActiveVideo ? 'opacity-100' : 'opacity-0 pointer-events-none absolute'
+            }`}
           />
-          <audio ref={audioRef} autoPlay playsInline />
 
           {!hasActiveVideo && (
             <div className="w-full h-full bg-slate-950 flex flex-col items-center justify-center text-center p-0.5">
@@ -179,15 +217,16 @@ const RemoteVideoTile = memo(
             : 'border-slate-800'
         }`}
       >
+        {/* CRITICAL: Video is muted so browsers do not reject video autoplay */}
         <video
           ref={videoRef}
           autoPlay
           playsInline
+          muted
           className={`w-full h-full object-cover transition-opacity duration-300 ${
-            hasActiveVideo ? 'opacity-100' : 'opacity-0 hidden'
+            hasActiveVideo ? 'opacity-100' : 'opacity-0 pointer-events-none absolute'
           }`}
         />
-        <audio ref={audioRef} autoPlay playsInline />
 
         {!hasActiveVideo && (
           <div className="w-full h-full bg-gradient-to-tr from-slate-950 via-slate-900 to-slate-800 flex flex-col items-center justify-center p-2 text-center animate-fade-in">
@@ -273,9 +312,20 @@ export const LiveKitVideoRoom = ({
   const [connectionStatus, setConnectionStatus] = useState<
     'requesting_permissions' | 'connected_livekit' | 'connected_webrtc' | 'reconnecting' | 'disconnected'
   >('requesting_permissions');
+  const [activeProvider, setActiveProvider] = useState<'livekit' | 'webrtc' | 'none'>('none');
   const [mediaError, setMediaError] = useState<MediaErrorType>(null);
   const [isSpeakingLocally, setIsSpeakingLocally] = useState(false);
   const [, setAudioLevel] = useState(0);
+
+  // Audio autoplay block state: when browser denies auto audio play until user interaction
+  const [audioAutoplayBlocked, setAudioAutoplayBlocked] = useState(false);
+
+  // Diagnostics toggle state
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+
+  // Track publication states
+  const [isPublishingAudio, setIsPublishingAudio] = useState(false);
+  const [isPublishingVideo, setIsPublishingVideo] = useState(false);
 
   // Dynamic remote feeds map: key = participantId or identity
   const [remoteFeeds, setRemoteFeeds] = useState<Map<string, RemoteFeed>>(new Map());
@@ -293,6 +343,8 @@ export const LiveKitVideoRoom = ({
 
   // Native WebRTC peer connections map: peerId -> RTCPeerConnection
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  // Queued ICE candidates for peers whose remote descriptions are not yet ready
+  const iceCandidatesQueueRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
 
   const myIdentity = participantId || `p_${participantName.replace(/\s+/g, '_')}`;
 
@@ -322,6 +374,8 @@ export const LiveKitVideoRoom = ({
     if (localMiniVideoRef.current) {
       localMiniVideoRef.current.srcObject = null;
     }
+    setIsPublishingAudio(false);
+    setIsPublishingVideo(false);
   }, []);
 
   // Cleanup WebRTC peer connections
@@ -332,6 +386,7 @@ export const LiveKitVideoRoom = ({
       } catch {}
     });
     peerConnectionsRef.current.clear();
+    iceCandidatesQueueRef.current.clear();
   }, []);
 
   // Sync incoming remoteParticipants prop with remoteFeeds state
@@ -364,12 +419,14 @@ export const LiveKitVideoRoom = ({
       });
 
       for (const [id, feed] of next.entries()) {
-        // Never remove participants who have active media tracks or are connected in the LiveKit room!
+        // Keep participants who have active media tracks or are connected in the LiveKit room
         if (feed.videoTrack || feed.audioTrack) continue;
         if (livekitRoomRef.current?.remoteParticipants?.has(id)) continue;
 
         if (remoteParticipants.length > 0) {
-          const stillInMeeting = remoteParticipants.some((p) => p.id === id || p.name === id || p.name === feed.participantName);
+          const stillInMeeting = remoteParticipants.some(
+            (p) => p.id === id || p.name === id || p.name === feed.participantName
+          );
           if (!stillInMeeting) {
             next.delete(id);
           }
@@ -380,10 +437,27 @@ export const LiveKitVideoRoom = ({
     });
   }, [remoteParticipants]);
 
+  // Audio unlock action when browser blocks autoplay
+  const handleUnlockAudio = useCallback(async () => {
+    try {
+      if (livekitRoomRef.current) {
+        await livekitRoomRef.current.startAudio();
+      }
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
+      setAudioAutoplayBlocked(false);
+    } catch (err) {
+      console.warn('[LiveKitVideoRoom] Unlock audio error:', err);
+    }
+  }, []);
+
   // Setup WebRTC peer-to-peer connection for fallback mesh
   const setupWebRtcPeerConnection = useCallback(
     async (remotePeerId: string, remotePeerName: string, isInitiator: boolean) => {
-      if (peerConnectionsRef.current.has(remotePeerId)) return;
+      if (peerConnectionsRef.current.has(remotePeerId)) {
+        return peerConnectionsRef.current.get(remotePeerId)!;
+      }
 
       try {
         const pc = new RTCPeerConnection({
@@ -452,12 +526,100 @@ export const LiveKitVideoRoom = ({
             signal: { type: 'offer', sdp: offer },
           });
         }
+
+        return pc;
       } catch (err) {
         console.warn('[LiveKitVideoRoom] WebRTC peer setup error:', err);
+        return null;
       }
     },
     [meetingId, myIdentity, participantName]
   );
+
+  // Handle incoming WebRTC signaling (offer, answer, candidate)
+  const handleWebRtcSignal = useCallback(
+    async (senderId: string, senderName: string, signal: any) => {
+      if (!signal || !signal.type) return;
+
+      try {
+        if (signal.type === 'offer') {
+          let pc = peerConnectionsRef.current.get(senderId);
+          if (!pc) {
+            pc = (await setupWebRtcPeerConnection(senderId, senderName, false)) || undefined;
+          }
+          if (!pc) return;
+
+          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+
+          // Drain queued ICE candidates
+          const queued = iceCandidatesQueueRef.current.get(senderId) || [];
+          for (const cand of queued) {
+            await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+          }
+          iceCandidatesQueueRef.current.delete(senderId);
+
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+
+          await api.sendWebRtcSignal(meetingId, {
+            targetParticipantId: senderId,
+            senderId: myIdentity,
+            senderName: participantName,
+            signal: { type: 'answer', sdp: answer },
+          });
+        } else if (signal.type === 'answer') {
+          const pc = peerConnectionsRef.current.get(senderId);
+          if (pc && pc.signalingState !== 'stable') {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+
+            // Drain queued ICE candidates
+            const queued = iceCandidatesQueueRef.current.get(senderId) || [];
+            for (const cand of queued) {
+              await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+            }
+            iceCandidatesQueueRef.current.delete(senderId);
+          }
+        } else if (signal.type === 'candidate' && signal.candidate) {
+          const pc = peerConnectionsRef.current.get(senderId);
+          if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate)).catch(() => {});
+          } else {
+            const queued = iceCandidatesQueueRef.current.get(senderId) || [];
+            queued.push(signal.candidate);
+            iceCandidatesQueueRef.current.set(senderId, queued);
+          }
+        }
+      } catch (signalErr) {
+        console.warn('[LiveKitVideoRoom] Incoming WebRTC signal handling error:', signalErr);
+      }
+    },
+    [meetingId, myIdentity, participantName, setupWebRtcPeerConnection]
+  );
+
+  // Subscribe to real-time WebRTC signals across devices (Supabase Realtime + SSE)
+  useEffect(() => {
+    if (!meetingId) return;
+
+    const unsubscribe = api.subscribeToBoardEvents(meetingId, (event: string, data: any) => {
+      if (event === 'webrtc_signal' && data) {
+        if (data.senderId === myIdentity) return;
+        if (data.targetParticipantId && data.targetParticipantId !== myIdentity) return;
+        handleWebRtcSignal(data.senderId, data.senderName || 'Squad Member', data.signal);
+      } else if (event === 'participant_joined' && data) {
+        if (data.id && data.id !== myIdentity) {
+          // If fallback WebRTC is needed and we are initiator:
+          const shouldInitiate = isHost || myIdentity < data.id;
+          if (shouldInitiate && activeProvider === 'webrtc') {
+            setupWebRtcPeerConnection(data.id, data.displayName || 'Squad Member', true);
+          }
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [meetingId, myIdentity, isHost, activeProvider, handleWebRtcSignal, setupWebRtcPeerConnection]);
 
   // Initialize hardware media & LiveKit room
   const initMedia = useCallback(async () => {
@@ -515,7 +677,6 @@ export const LiveKitVideoRoom = ({
       } else {
         setMediaError('unknown');
       }
-      setConnectionStatus('disconnected');
     }
 
     if (stream) {
@@ -525,11 +686,13 @@ export const LiveKitVideoRoom = ({
       audioTracks.forEach((t) => {
         t.enabled = !isMuted;
       });
+      setIsPublishingAudio(audioTracks.length > 0 && !isMuted);
 
       const videoTracks = stream.getVideoTracks();
       videoTracks.forEach((t) => {
         t.enabled = isVideoEnabled;
       });
+      setIsPublishingVideo(videoTracks.length > 0 && isVideoEnabled);
 
       if (localVideoRef.current && videoTracks.length > 0) {
         localVideoRef.current.srcObject = stream;
@@ -577,8 +740,6 @@ export const LiveKitVideoRoom = ({
       } catch (audioCtxErr) {
         console.warn('[LiveKitVideoRoom] Audio analyser setup notice:', audioCtxErr);
       }
-
-      setConnectionStatus('connected_webrtc');
     }
 
     // 2. Connect to LiveKit Cloud Room
@@ -603,6 +764,11 @@ export const LiveKitVideoRoom = ({
           const room = new Room({
             adaptiveStream: true,
             dynacast: true,
+            audioCaptureDefaults: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
           });
           livekitRoomRef.current = room;
 
@@ -686,7 +852,7 @@ export const LiveKitVideoRoom = ({
             });
           });
 
-          room.on(RoomEvent.TrackUnsubscribed, (track: any, publication: any, participant: any) => {
+          room.on(RoomEvent.TrackUnsubscribed, (track: any, _publication: any, participant: any) => {
             const pid = participant.identity || participant.sid;
             setRemoteFeeds((prev) => {
               const next = new Map(prev);
@@ -744,35 +910,96 @@ export const LiveKitVideoRoom = ({
             });
           });
 
-          room.on(RoomEvent.ConnectionStateChanged, (state: string) => {
-            if (state === 'reconnecting') setConnectionStatus('reconnecting');
-            if (state === 'connected') setConnectionStatus('connected_livekit');
-            if (state === 'disconnected') setConnectionStatus('connected_webrtc');
+          room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+            if (!room.canPlaybackAudio) {
+              setAudioAutoplayBlocked(true);
+            } else {
+              setAudioAutoplayBlocked(false);
+            }
           });
 
+          room.on(RoomEvent.ConnectionStateChanged, (state: string) => {
+            if (state === 'reconnecting') setConnectionStatus('reconnecting');
+            if (state === 'connected') {
+              setConnectionStatus('connected_livekit');
+              setActiveProvider('livekit');
+            }
+            if (state === 'disconnected') {
+              setConnectionStatus(stream ? 'connected_webrtc' : 'disconnected');
+              setActiveProvider(stream ? 'webrtc' : 'none');
+            }
+          });
+
+          // Connect to room
           await room.connect(serverUrl, token);
           setConnectionStatus('connected_livekit');
+          setActiveProvider('livekit');
 
-          if (stream) {
-            const videoTrack = stream.getVideoTracks()[0];
-            const audioTrack = stream.getAudioTracks()[0];
-            if (videoTrack) await room.localParticipant.publishTrack(videoTrack);
-            if (audioTrack) await room.localParticipant.publishTrack(audioTrack);
+          // Check if audio playback is permitted by browser policy
+          if (!room.canPlaybackAudio) {
+            setAudioAutoplayBlocked(true);
           }
 
+          // Enable microphone & camera via LiveKit SDK
+          try {
+            await room.localParticipant.setMicrophoneEnabled(!isMuted);
+            setIsPublishingAudio(!isMuted);
+          } catch (micPubErr) {
+            console.warn('[LiveKitVideoRoom] LiveKit mic publish notice:', micPubErr);
+          }
+
+          try {
+            await room.localParticipant.setCameraEnabled(isVideoEnabled);
+            setIsPublishingVideo(isVideoEnabled);
+          } catch (camPubErr) {
+            console.warn('[LiveKitVideoRoom] LiveKit cam publish notice:', camPubErr);
+          }
+
+          // Ingest already-connected participants
           room.remoteParticipants.forEach((p: any) => {
             updateParticipantFeed(p);
           });
+          return;
         } catch (lkConnectErr) {
           console.warn('[LiveKitVideoRoom] LiveKit Cloud connect failed, activating WebRTC mesh:', lkConnectErr);
-          setConnectionStatus(stream ? 'connected_webrtc' : 'disconnected');
         }
       }
     } catch (tokenErr) {
       console.warn('[LiveKitVideoRoom] Media token notice:', tokenErr);
-      if (stream) setConnectionStatus('connected_webrtc');
     }
-  }, [meetingId, meetingCode, myIdentity, participantName, isHost, stopLocalTracks, cleanupPeerConnections, isMuted, isVideoEnabled, externalToggleVideo]);
+
+    // 3. Fallback: Native WebRTC Mesh
+    if (stream) {
+      setConnectionStatus('connected_webrtc');
+      setActiveProvider('webrtc');
+
+      // Initiate WebRTC connections to existing squad members if host
+      remoteParticipants.forEach((p) => {
+        if (p.id !== myIdentity) {
+          const shouldInitiate = isHost || myIdentity < p.id;
+          if (shouldInitiate) {
+            setupWebRtcPeerConnection(p.id, p.name, true);
+          }
+        }
+      });
+    } else {
+      setConnectionStatus('disconnected');
+      setActiveProvider('none');
+    }
+  }, [
+    meetingId,
+    meetingCode,
+    myIdentity,
+    participantName,
+    isHost,
+    stopLocalTracks,
+    cleanupPeerConnections,
+    isMuted,
+    isVideoEnabled,
+    externalToggleVideo,
+    remoteParticipants,
+    setupWebRtcPeerConnection,
+  ]);
 
   // Run initialization on mount & cleanup on unmount
   useEffect(() => {
@@ -788,7 +1015,7 @@ export const LiveKitVideoRoom = ({
     };
   }, [initMedia, stopLocalTracks, cleanupPeerConnections]);
 
-  // Synchronize mic mute state with physical hardware audio track
+  // Synchronize mic mute state with physical hardware audio track & LiveKit
   useEffect(() => {
     if (localStreamRef.current) {
       const audioTracks = localStreamRef.current.getAudioTracks();
@@ -798,9 +1025,12 @@ export const LiveKitVideoRoom = ({
     }
 
     if (livekitRoomRef.current?.localParticipant) {
-      try {
-        livekitRoomRef.current.localParticipant.setMicrophoneEnabled(!isMuted);
-      } catch {}
+      livekitRoomRef.current.localParticipant
+        .setMicrophoneEnabled(!isMuted)
+        .then(() => setIsPublishingAudio(!isMuted))
+        .catch(() => {});
+    } else {
+      setIsPublishingAudio(!isMuted && !!localStreamRef.current?.getAudioTracks().length);
     }
 
     if (isMuted) {
@@ -809,7 +1039,7 @@ export const LiveKitVideoRoom = ({
     }
   }, [isMuted]);
 
-  // Synchronize camera toggle with physical hardware video track
+  // Synchronize camera toggle with physical hardware video track & LiveKit
   useEffect(() => {
     if (localStreamRef.current) {
       const videoTracks = localStreamRef.current.getVideoTracks();
@@ -828,9 +1058,12 @@ export const LiveKitVideoRoom = ({
     }
 
     if (livekitRoomRef.current?.localParticipant) {
-      try {
-        livekitRoomRef.current.localParticipant.setCameraEnabled(isVideoEnabled);
-      } catch {}
+      livekitRoomRef.current.localParticipant
+        .setCameraEnabled(isVideoEnabled)
+        .then(() => setIsPublishingVideo(isVideoEnabled))
+        .catch(() => {});
+    } else {
+      setIsPublishingVideo(isVideoEnabled && !!localStreamRef.current?.getVideoTracks().length);
     }
   }, [isVideoEnabled]);
 
@@ -850,6 +1083,17 @@ export const LiveKitVideoRoom = ({
   if (!isDrawerOpen) {
     return (
       <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+        {/* Hidden persistent audio feeds for continuous background audio playback */}
+        <div className="hidden" aria-hidden="true">
+          {remoteFeedList.map((feed) => (
+            <PersistentAudioFeed
+              key={feed.participantId}
+              feed={feed}
+              onAutoplayBlocked={() => setAudioAutoplayBlocked(true)}
+            />
+          ))}
+        </div>
+
         {/* Local Participant Compact Thumbnail */}
         <div
           onClick={onExpandDrawer}
@@ -866,7 +1110,7 @@ export const LiveKitVideoRoom = ({
             playsInline
             muted
             className={`w-full h-full object-cover transform -scale-x-100 ${
-              isVideoEnabled && !mediaError ? 'opacity-100' : 'opacity-0 hidden'
+              isVideoEnabled && !mediaError ? 'opacity-100' : 'opacity-0 pointer-events-none absolute'
             }`}
           />
           {(!isVideoEnabled || mediaError) && (
@@ -914,6 +1158,17 @@ export const LiveKitVideoRoom = ({
   // ---------------------------------------------------------------------------
   return (
     <div className="flex flex-col gap-2">
+      {/* Hidden persistent audio elements to guarantee audio is heard at all times */}
+      <div className="hidden" aria-hidden="true">
+        {remoteFeedList.map((feed) => (
+          <PersistentAudioFeed
+            key={feed.participantId}
+            feed={feed}
+            onAutoplayBlocked={() => setAudioAutoplayBlocked(true)}
+          />
+        ))}
+      </div>
+
       {/* Header status bar */}
       <div className="flex items-center justify-between text-xs text-slate-400 mb-0.5">
         <span className="font-semibold uppercase tracking-wider text-[10px] flex items-center gap-1.5">
@@ -927,24 +1182,58 @@ export const LiveKitVideoRoom = ({
           <span className="text-white font-bold">Tactical Comms</span>
         </span>
 
-        <span
-          className={`text-[10px] px-2 py-0.5 rounded font-mono border flex items-center gap-1 ${
-            connectionStatus === 'connected_livekit'
-              ? 'bg-emerald-950/80 border-emerald-700/60 text-emerald-300'
-              : connectionStatus === 'connected_webrtc'
-              ? 'bg-slate-900 border-slate-700 text-[#a3e635]'
-              : connectionStatus === 'requesting_permissions'
-              ? 'bg-amber-950/80 border-amber-800 text-amber-300'
-              : 'bg-rose-950/80 border-rose-800 text-rose-300'
-          }`}
-        >
-          {connectionStatus === 'connected_livekit' && 'LiveKit Cloud'}
-          {connectionStatus === 'connected_webrtc' && 'WebRTC Live'}
-          {connectionStatus === 'requesting_permissions' && 'Connecting...'}
-          {connectionStatus === 'reconnecting' && 'Reconnecting...'}
-          {connectionStatus === 'disconnected' && 'Disconnected'}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setShowDiagnostics((prev) => !prev)}
+            className="text-[10px] text-slate-400 hover:text-[#a3e635] flex items-center gap-0.5 transition-colors cursor-pointer"
+            title="Toggle Connection Diagnostics"
+          >
+            <Activity className="w-3 h-3" />
+            <span>Diagnostics</span>
+            {showDiagnostics ? <ChevronUp className="w-2.5 h-2.5" /> : <ChevronDown className="w-2.5 h-2.5" />}
+          </button>
+
+          <span
+            className={`text-[10px] px-2 py-0.5 rounded font-mono border flex items-center gap-1 ${
+              connectionStatus === 'connected_livekit'
+                ? 'bg-emerald-950/80 border-emerald-700/60 text-emerald-300'
+                : connectionStatus === 'connected_webrtc'
+                ? 'bg-slate-900 border-slate-700 text-[#a3e635]'
+                : connectionStatus === 'requesting_permissions'
+                ? 'bg-amber-950/80 border-amber-800 text-amber-300'
+                : 'bg-rose-950/80 border-rose-800 text-rose-300'
+            }`}
+          >
+            {connectionStatus === 'connected_livekit' && 'LiveKit Cloud'}
+            {connectionStatus === 'connected_webrtc' && 'WebRTC Live'}
+            {connectionStatus === 'requesting_permissions' && 'Connecting...'}
+            {connectionStatus === 'reconnecting' && 'Reconnecting...'}
+            {connectionStatus === 'disconnected' && 'Disconnected'}
+          </span>
+        </div>
       </div>
+
+      {/* Browser Autoplay Blocked Banner */}
+      {audioAutoplayBlocked && (
+        <div className="p-2.5 rounded-xl bg-indigo-950/80 border border-indigo-700/80 text-indigo-200 text-xs flex items-center justify-between gap-2 animate-fade-in shadow-md">
+          <div className="flex items-center gap-2">
+            <VolumeX className="w-4 h-4 text-indigo-300 shrink-0" />
+            <div>
+              <p className="font-semibold text-white leading-tight">Audio Playback Restricted</p>
+              <p className="text-[11px] text-indigo-300/90 leading-tight">
+                Browser blocked background audio until you interact.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={handleUnlockAudio}
+            className="shrink-0 px-2.5 py-1 rounded-lg bg-[#a3e635] hover:bg-[#b4f046] text-slate-950 font-bold text-xs flex items-center gap-1 cursor-pointer transition-colors shadow-sm"
+          >
+            <Volume2 className="w-3.5 h-3.5" />
+            <span>Enable Audio</span>
+          </button>
+        </div>
+      )}
 
       {/* Permission or hardware error banner */}
       {mediaError && (
@@ -978,6 +1267,66 @@ export const LiveKitVideoRoom = ({
         </div>
       )}
 
+      {/* Comprehensive Diagnostics Panel (Requirement 6) */}
+      {showDiagnostics && (
+        <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-700 text-slate-300 text-[11px] space-y-1.5 animate-fade-in shadow-inner font-mono">
+          <div className="text-[10px] uppercase font-bold text-[#a3e635] tracking-wider border-b border-slate-800 pb-1 flex items-center justify-between">
+            <span>Real-Time Comms Diagnostics</span>
+            <span>Room: {meetingCode || meetingId.slice(0, 8)}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[10px]">
+            <div>
+              <span className="text-slate-500">Media Provider:</span>{' '}
+              <span className="text-white font-bold">{activeProvider === 'livekit' ? 'LiveKit Cloud SFU' : activeProvider === 'webrtc' ? 'WebRTC P2P Mesh' : 'None'}</span>
+            </div>
+            <div>
+              <span className="text-slate-500">Comms Status:</span>{' '}
+              <span className="text-white font-bold">{connectionStatus}</span>
+            </div>
+            <div>
+              <span className="text-slate-500">Local Mic Publish:</span>{' '}
+              <span className={isPublishingAudio ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                {isPublishingAudio ? 'Active' : 'Muted'}
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-500">Local Cam Publish:</span>{' '}
+              <span className={isPublishingVideo ? 'text-emerald-400 font-bold' : 'text-slate-400 font-bold'}>
+                {isPublishingVideo ? 'Transmitting' : 'Disabled'}
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-500">Remote Squad:</span>{' '}
+              <span className="text-white font-bold">{remoteFeedList.length} connected</span>
+            </div>
+            <div>
+              <span className="text-slate-500">Audio Playback:</span>{' '}
+              <span className={audioAutoplayBlocked ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
+                {audioAutoplayBlocked ? 'Blocked (Autoplay)' : 'Playing'}
+              </span>
+            </div>
+          </div>
+          {remoteFeedList.length > 0 && (
+            <div className="border-t border-slate-800 pt-1 text-[9px] text-slate-400 space-y-0.5">
+              <span className="text-slate-500 block">Subscribed Remote Tracks:</span>
+              {remoteFeedList.map((f) => (
+                <div key={f.participantId} className="flex items-center justify-between">
+                  <span className="text-slate-300 truncate max-w-[120px]">{f.participantName}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className={f.audioTrack ? 'text-emerald-400' : 'text-slate-600'}>
+                      Audio: {f.audioTrack ? (f.isAudioMuted ? 'Muted' : 'Live') : 'None'}
+                    </span>
+                    <span className={f.videoTrack ? 'text-blue-400' : 'text-slate-600'}>
+                      Video: {f.videoTrack ? (f.isVideoMuted ? 'Off' : 'Live') : 'None'}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Dynamic Grid of video tiles (Local + Remote Participants) */}
       <div className="grid grid-cols-2 gap-2">
         {/* Local user tile */}
@@ -994,7 +1343,7 @@ export const LiveKitVideoRoom = ({
             playsInline
             muted
             className={`w-full h-full object-cover transform -scale-x-100 transition-opacity duration-300 ${
-              isVideoEnabled && !mediaError ? 'opacity-100' : 'opacity-0 hidden'
+              isVideoEnabled && !mediaError ? 'opacity-100' : 'opacity-0 pointer-events-none absolute'
             }`}
           />
 

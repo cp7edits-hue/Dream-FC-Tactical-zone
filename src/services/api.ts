@@ -697,9 +697,44 @@ export const api = {
       }
     }
 
+    // 3. Connect Supabase Realtime broadcast channel (cross-device: phone to laptop)
+    const supabase = getClientSupabase();
+    let supabaseChannel: any = null;
+    if (supabase) {
+      try {
+        supabaseChannel = supabase.channel(`dfc_room_${meetingId}`, {
+          config: { broadcast: { self: false } },
+        });
+        supabaseChannel
+          .on('broadcast', { event: 'webrtc_signal' }, ({ payload }: any) => {
+            if (payload) onEvent('webrtc_signal', payload);
+          })
+          .on('broadcast', { event: 'board_updated' }, ({ payload }: any) => {
+            if (payload) onEvent('board_updated', payload);
+          })
+          .on('broadcast', { event: 'participant_joined' }, ({ payload }: any) => {
+            if (payload) onEvent('participant_joined', payload);
+          })
+          .on('broadcast', { event: 'participant_left' }, ({ payload }: any) => {
+            if (payload) onEvent('participant_left', payload);
+          })
+          .on('broadcast', { event: 'chat_message' }, ({ payload }: any) => {
+            if (payload) onEvent('chat_message', payload);
+          })
+          .subscribe();
+      } catch (err) {
+        console.warn('[Supabase Realtime] Channel subscribe warning:', err);
+      }
+    }
+
     return () => {
       eventSource?.close();
       broadcastChannel?.close();
+      if (supabase && supabaseChannel) {
+        try {
+          supabase.removeChannel(supabaseChannel);
+        } catch {}
+      }
     };
   },
 
@@ -710,7 +745,20 @@ export const api = {
     senderName: string;
     signal: any;
   }) {
-    // Broadcast locally via BroadcastChannel first for immediate multi-tab response
+    // 1. Broadcast over Supabase Realtime WebSocket (cross-device: phone to laptop)
+    const supabase = getClientSupabase();
+    if (supabase) {
+      try {
+        const channel = supabase.channel(`dfc_room_${meetingId}`);
+        channel.send({
+          type: 'broadcast',
+          event: 'webrtc_signal',
+          payload: signalData,
+        });
+      } catch {}
+    }
+
+    // 2. Broadcast locally via BroadcastChannel first for immediate multi-tab response
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       try {
         const bc = new BroadcastChannel(`dfc_realtime_${meetingId}`);
@@ -719,7 +767,7 @@ export const api = {
       } catch {}
     }
 
-    // Also send through backend signaling endpoint
+    // 3. Also send through backend signaling endpoint
     const res = await fetch(`/api/meetings/${meetingId}/signal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
