@@ -807,18 +807,25 @@ apiRouter.post(['/meetings/:meetingId/board/operations', '/meetings/:meetingId/o
 
   const meeting = store.meetings.get(participant.meeting_id);
   if (!meeting || meeting.status === 'ended') {
-    res.status(410).json({ error: 'Meeting has ended' });
+    res.status(410).json({ error: 'Meeting has ended', code: 'MEETING_ENDED' });
     return;
   }
 
-  // Enforce board editing permission
-  const canEdit =
-    participant.role === 'host' ||
-    participant.can_edit_board ||
-    meeting.board_permission_mode === 'open_collaboration';
+  // Enforce role-based board editing permissions:
+  // 1. Host has full control by default
+  // 2. Assistant Coach has board control when assigned the role by host
+  // 3. Host-authorized participants explicitly granted can_edit_board by host
+  // All other players are strictly read-only
+  const isHost = participant.role === 'host' || participant.role === 'Head Coach';
+  const isAssistantCoach = participant.role === 'assistant_coach' || participant.role === 'Assistant Coach';
+  const isAuthorizedPlayer = Boolean(participant.can_edit_board);
+  const canEdit = isHost || isAssistantCoach || isAuthorizedPlayer;
 
   if (!canEdit) {
-    res.status(403).json({ error: 'Permission denied: Board editing restricted to coach.' });
+    res.status(403).json({
+      error: 'Permission denied: Board editing restricted to coach or authorized members.',
+      code: 'BOARD_EDIT_FORBIDDEN',
+    });
     return;
   }
 
@@ -986,9 +993,9 @@ apiRouter.get('/meetings/:meetingId/board/events', (req: Request, res: Response)
 });
 
 // -----------------------------------------------------------------------------
-// 8. HOST MODERATION (Admit, Kick, Mute, Board Edit Toggle)
+// 8. HOST MODERATION (Admit, Kick, Mute, Board Edit Toggle, Role Assignment)
 // -----------------------------------------------------------------------------
-apiRouter.post('/meetings/:meetingId/participants/:participantId/moderation', (req: Request, res: Response): void => {
+apiRouter.post('/meetings/:meetingId/participants/:participantId/moderation', async (req: Request, res: Response): Promise<void> => {
   const caller = getSessionParticipant(req);
   if (!caller || caller.meeting_id !== req.params.meetingId || caller.role !== 'host') {
     res.status(403).json({ error: 'Forbidden: host authorization required' });
@@ -1005,6 +1012,12 @@ apiRouter.post('/meetings/:meetingId/participants/:participantId/moderation', (r
   const target = store.participants.get(req.params.participantId);
   if (!target || target.meeting_id !== req.params.meetingId) {
     res.status(404).json({ error: 'Target participant not found in this meeting' });
+    return;
+  }
+
+  // Prevent modifying the host
+  if (target.role === 'host' && action !== 'mute' && action !== 'unmute') {
+    res.status(400).json({ error: 'Cannot modify host permissions or role' });
     return;
   }
 
@@ -1029,15 +1042,46 @@ apiRouter.post('/meetings/:meetingId/participants/:participantId/moderation', (r
       break;
     case 'revoke_board_edit':
       target.can_edit_board = false;
+      if (target.role === 'assistant_coach') {
+        target.role = 'player';
+      }
       break;
+    case 'assign_assistant_coach':
+      target.role = 'assistant_coach';
+      target.can_edit_board = true;
+      break;
+    case 'revoke_assistant_coach':
+      target.role = 'player';
+      target.can_edit_board = false;
+      break;
+  }
+
+  // Persist updated participant state to Supabase
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase
+        .from('meeting_participants')
+        .update({
+          role: target.role,
+          can_edit_board: target.can_edit_board,
+          is_muted: target.is_muted,
+          admission_status: target.admission_status,
+        })
+        .eq('id', target.id);
+    } catch (e: any) {
+      console.warn('[Supabase] Warning updating participant moderation:', e?.message);
+    }
   }
 
   // Broadcast moderation update to room
   store.broadcastToMeeting(req.params.meetingId, 'moderation_event', {
     targetId: target.id,
+    targetName: target.display_name,
     action,
-    isMuted: target.is_muted,
+    role: target.role,
     canEditBoard: target.can_edit_board,
+    isMuted: target.is_muted,
     admissionStatus: target.admission_status,
   });
 
@@ -1069,10 +1113,10 @@ apiRouter.post('/meetings/:meetingId/lock', (req: Request, res: Response): void 
 // -----------------------------------------------------------------------------
 // 10. END MEETING FOR ALL
 // -----------------------------------------------------------------------------
-apiRouter.post('/meetings/:meetingId/end', (req: Request, res: Response): void => {
+apiRouter.post('/meetings/:meetingId/end', async (req: Request, res: Response): Promise<void> => {
   const caller = getSessionParticipant(req);
   if (!caller || caller.meeting_id !== req.params.meetingId || caller.role !== 'host') {
-    res.status(403).json({ error: 'Forbidden' });
+    res.status(403).json({ error: 'Forbidden: host authorization required' });
     return;
   }
 
@@ -1085,9 +1129,32 @@ apiRouter.post('/meetings/:meetingId/end', (req: Request, res: Response): void =
   meeting.status = 'ended';
   meeting.ended_at = new Date().toISOString();
 
-  store.broadcastToMeeting(meeting.id, 'meeting_ended', { message: 'The host coach has ended this tactical briefing.' });
+  // Persist ended status to Supabase
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase
+        .from('meetings')
+        .update({
+          status: 'ended',
+          ended_at: meeting.ended_at,
+        })
+        .eq('id', meeting.id);
+    } catch (e: any) {
+      console.warn('[Supabase] Warning ending meeting:', e?.message);
+    }
+  }
 
-  res.json({ success: true });
+  store.broadcastToMeeting(meeting.id, 'meeting_ended', {
+    message: 'The coach has ended this briefing.',
+    endedAt: meeting.ended_at,
+  });
+
+  res.json({
+    success: true,
+    meeting: { id: meeting.id, status: meeting.status, endedAt: meeting.ended_at },
+    message: 'Meeting ended for everyone',
+  });
 });
 
 // -----------------------------------------------------------------------------

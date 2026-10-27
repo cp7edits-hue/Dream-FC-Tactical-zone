@@ -5,9 +5,15 @@ interface PlayerCardModalProps {
   player: Player | null;
   onClose: () => void;
   onAddRunForPlayer: (player: Player) => void;
+  canEditBoard?: boolean;
 }
 
-export const PlayerCardModal = ({ player, onClose, onAddRunForPlayer }: PlayerCardModalProps) => {
+export const PlayerCardModal = ({
+  player,
+  onClose,
+  onAddRunForPlayer,
+  canEditBoard = true,
+}: PlayerCardModalProps) => {
   if (!player) return null;
 
   const isHome = player.team === 'home';
@@ -56,15 +62,21 @@ export const PlayerCardModal = ({ player, onClose, onAddRunForPlayer }: PlayerCa
         {roleDescriptions[player.role] || 'Execute tactical positioning and support ball carrier.'}
       </div>
 
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => onAddRunForPlayer(player)}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg bg-[#a3e635] text-slate-950 font-bold text-xs hover:bg-[#b4f046] transition-colors cursor-pointer"
-        >
-          <ArrowUpRight className="w-3.5 h-3.5" />
-          <span>Add Run Curve</span>
-        </button>
-      </div>
+      {canEditBoard ? (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onAddRunForPlayer(player)}
+            className="flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg bg-[#a3e635] text-slate-950 font-bold text-xs hover:bg-[#b4f046] transition-colors cursor-pointer"
+          >
+            <ArrowUpRight className="w-3.5 h-3.5" />
+            <span>Add Run Curve</span>
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg bg-slate-900 border border-slate-800/80 text-slate-400 font-medium text-xs">
+          <span>View-Only Player Profile</span>
+        </div>
+      )}
     </div>
   );
 };

@@ -17,10 +17,13 @@ import {
   ArrowDown,
   Zap,
   ListOrdered,
+  Eye,
+  Lock,
 } from 'lucide-react';
 import { FormationType, TacticalPathType, TacticalPath, SimulationStatus } from '../types/tactics';
 
 interface TacticalDockProps {
+  canEditBoard?: boolean;
   currentFormation: FormationType;
   onSelectFormation: (formation: FormationType) => void;
   teamDisplay: 'both' | 'home' | 'away';
@@ -49,6 +52,7 @@ interface TacticalDockProps {
 }
 
 export const TacticalDock = ({
+  canEditBoard = true,
   currentFormation,
   onSelectFormation,
   teamDisplay,
@@ -267,8 +271,25 @@ export const TacticalDock = ({
 
           {/* Tab 1: Tactical Tools (Draw Pass highlighted, Move, Curves, Clear) */}
           {activeTab === 'tools' && (
-            <div className="flex items-center justify-between gap-2 overflow-x-auto pb-1">
-              <div className="flex items-center gap-1.5 sm:gap-2">
+            !canEditBoard ? (
+              <div className="flex items-center justify-between py-1.5 px-3 rounded-xl bg-slate-900/90 border border-slate-800 text-xs text-slate-300">
+                <div className="flex items-center gap-2">
+                  <span className="p-1 rounded-md bg-[#a3e635]/20 text-[#a3e635]">
+                    <Eye className="w-4 h-4" />
+                  </span>
+                  <div>
+                    <span className="font-bold text-white block leading-tight">View-Only Tactical Briefing</span>
+                    <span className="text-[10px] text-slate-400">Board movements, drawings, and formations are controlled by the Coach</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Live Sync</span>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-2 overflow-x-auto pb-1">
+                <div className="flex items-center gap-1.5 sm:gap-2">
                 {/* 1. Draw Pass Button - Primary Highlight */}
                 <button
                   onClick={() => onSelectDrawTool('pass')}
@@ -371,7 +392,7 @@ export const TacticalDock = ({
                 </button>
               </div>
             </div>
-          )}
+          ))}
 
           {/* Tab 2: Pass Sequence Manager (Order, Reorder, Delete) */}
           {activeTab === 'sequence' && (
@@ -459,17 +480,25 @@ export const TacticalDock = ({
           {activeTab === 'formations' && (
             <div className="flex items-center justify-between gap-2 overflow-x-auto pb-1">
               <div className="flex items-center gap-1.5 min-w-max">
+                {!canEditBoard && (
+                  <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1 pr-1">
+                    <Lock className="w-3 h-3 text-amber-400" />
+                    <span>Coach Set:</span>
+                  </span>
+                )}
                 {formations.map((f) => {
                   const isActive = currentFormation === f;
                   return (
                     <button
                       key={f}
-                      onClick={() => onSelectFormation(f)}
-                      className={`px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                      onClick={() => canEditBoard && onSelectFormation(f)}
+                      disabled={!canEditBoard}
+                      title={!canEditBoard ? 'Formation changes restricted to Coach' : undefined}
+                      className={`px-3 py-2 rounded-xl text-xs font-bold transition-all ${
                         isActive
                           ? 'bg-[#a3e635] text-slate-950 shadow-md shadow-[#a3e635]/20 scale-105'
-                          : 'bg-slate-900/90 text-slate-300 hover:bg-slate-800 hover:text-white border border-slate-800'
-                      }`}
+                          : 'bg-slate-900/90 text-slate-300 border border-slate-800'
+                      } ${!canEditBoard ? 'opacity-80 cursor-default' : 'hover:bg-slate-800 hover:text-white cursor-pointer'}`}
                     >
                       {f}
                     </button>
@@ -477,15 +506,17 @@ export const TacticalDock = ({
                 })}
               </div>
 
-              <div className="flex items-center gap-1 pl-2 border-l border-slate-800">
-                <button
-                  onClick={onResetFormation}
-                  className="p-2 rounded-lg bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800 transition-colors cursor-pointer"
-                  title="Reset positions to default formation"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                </button>
-              </div>
+              {canEditBoard && (
+                <div className="flex items-center gap-1 pl-2 border-l border-slate-800">
+                  <button
+                    onClick={onResetFormation}
+                    className="p-2 rounded-lg bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800 transition-colors cursor-pointer"
+                    title="Reset positions to default formation"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -9,6 +9,7 @@ interface ThreeCanvasProps {
   cameraPreset: CameraPreset;
   isDrawingMode: boolean;
   drawingType: 'pass' | 'run' | 'press' | 'zone';
+  canEditBoard?: boolean;
   onPlayerSelect: (playerId: string | null) => void;
   onPlayerMove: (playerId: string, pos: { x: number; z: number }) => void;
   onBallMove: (pos: { x: number; z: number }) => void;
@@ -23,6 +24,7 @@ export const ThreeCanvas = ({
   cameraPreset,
   isDrawingMode,
   drawingType,
+  canEditBoard = true,
   onPlayerSelect,
   onPlayerMove,
   onBallMove,
@@ -53,6 +55,20 @@ export const ThreeCanvas = ({
       sceneRef.current = null;
     };
   }, []);
+
+  // Update callbacks whenever they change
+  useEffect(() => {
+    if (!sceneRef.current) return;
+    sceneRef.current.onPlayerSelect = onPlayerSelect;
+    sceneRef.current.onPlayerMove = onPlayerMove;
+    sceneRef.current.onBallMove = onBallMove;
+    sceneRef.current.onPathDrawn = onPathDrawn;
+  }, [onPlayerSelect, onPlayerMove, onBallMove, onPathDrawn]);
+
+  // Update canEditBoard
+  useEffect(() => {
+    sceneRef.current?.setCanEditBoard(canEditBoard);
+  }, [canEditBoard]);
 
   // Update players
   useEffect(() => {

@@ -32,6 +32,7 @@ interface TopNavbarProps {
   onToggleHero: () => void;
   onOpenSavedTactics?: () => void;
   onOpenContact?: () => void;
+  canEditBoard?: boolean;
 }
 
 export const TopNavbar = ({
@@ -49,6 +50,7 @@ export const TopNavbar = ({
   onToggleHero,
   onOpenSavedTactics,
   onOpenContact,
+  canEditBoard = true,
 }: TopNavbarProps) => {
   const [drillMenuOpen, setDrillMenuOpen] = useState(false);
   const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
@@ -126,20 +128,25 @@ export const TopNavbar = ({
 
           {drillMenuOpen && (
             <div className="absolute right-0 mt-2 w-72 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-2 z-50">
-              <div className="px-2 py-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                Preset Tactical Plans
+              <div className="px-2 py-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                <span>Preset Tactical Plans</span>
+                {!canEditBoard && <span className="text-[10px] text-amber-400 font-medium">Coach Locked</span>}
               </div>
               {PRESET_DRILLS.map((drill) => (
                 <button
                   key={drill.id}
+                  disabled={!canEditBoard}
                   onClick={() => {
+                    if (!canEditBoard) return;
                     onSelectDrill(drill);
                     setDrillMenuOpen(false);
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors cursor-pointer flex flex-col gap-0.5 ${
-                    selectedDrillId === drill.id
-                      ? 'bg-[#a3e635]/15 text-[#a3e635] border border-[#a3e635]/30'
-                      : 'text-slate-200 hover:bg-slate-800'
+                  className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors flex flex-col gap-0.5 ${
+                    !canEditBoard
+                      ? 'opacity-60 cursor-not-allowed text-slate-400'
+                      : selectedDrillId === drill.id
+                      ? 'bg-[#a3e635]/15 text-[#a3e635] border border-[#a3e635]/30 cursor-pointer'
+                      : 'text-slate-200 hover:bg-slate-800 cursor-pointer'
                   }`}
                 >
                   <span className="font-semibold text-white">{drill.title}</span>

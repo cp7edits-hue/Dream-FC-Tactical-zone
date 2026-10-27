@@ -292,7 +292,246 @@ async function runTests() {
     assert.strictEqual(signalRes.status, 200);
     console.log('   ✓ WebRTC signaling endpoint successfully processed signal');
 
-    // 5I: Leave meeting endpoint
+    // 5I: Role-based Board Permissions & Moderation Tests
+    console.log('9. Testing Role-Based Board Permissions & Moderation...');
+    
+    // 5I-1: Host edits board -> should succeed (200)
+    const hostBoardRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/board/operations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({
+        operation: {
+          type: 'set_formation',
+          payload: { formation: '4-2-3-1' },
+        },
+      }),
+    });
+    assert.strictEqual(hostBoardRes.status, 200, `Host board edit should return 200, got ${hostBoardRes.status}`);
+    console.log('   ✓ Host successfully edited the tactical board');
+
+    // 5I-2: Regular player attempts to edit board -> should be rejected (403 BOARD_EDIT_FORBIDDEN)
+    const playerBoardRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/board/operations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': joinData.sessionId,
+      },
+      body: JSON.stringify({
+        operation: {
+          type: 'set_formation',
+          payload: { formation: '3-5-2' },
+        },
+      }),
+    });
+    assert.strictEqual(playerBoardRes.status, 403, `Unauthorized player board edit should return 403, got ${playerBoardRes.status}`);
+    const playerBoardErr = await playerBoardRes.json();
+    assert.strictEqual(playerBoardErr.code, 'BOARD_EDIT_FORBIDDEN', 'Should return BOARD_EDIT_FORBIDDEN code');
+    console.log('   ✓ Unauthorized player board mutation correctly rejected with 403 BOARD_EDIT_FORBIDDEN');
+
+    // 5I-3: Non-host attempts to moderate -> should be rejected (403 HOST_ONLY_ACTION)
+    const unauthorizedModRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/participants/${createData.participant.id}/moderation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': joinData.sessionId,
+      },
+      body: JSON.stringify({ action: 'assign_assistant_coach' }),
+    });
+    assert.strictEqual(unauthorizedModRes.status, 403, `Non-host moderation attempt should return 403, got ${unauthorizedModRes.status}`);
+    console.log('   ✓ Non-host moderation attempt correctly rejected with 403');
+
+    // 5I-4: Host assigns Assistant Coach to Player
+    const assignAsstRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/participants/${joinData.participant.id}/moderation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({ action: 'assign_assistant_coach' }),
+    });
+    assert.strictEqual(assignAsstRes.status, 200, `Host assign assistant coach should return 200, got ${assignAsstRes.status}`);
+    const asstModData = await assignAsstRes.json();
+    assert.strictEqual(asstModData.target?.role, 'assistant_coach');
+    assert.strictEqual(asstModData.target?.can_edit_board, true);
+    console.log('   ✓ Host successfully promoted player to Assistant Coach with board editing rights');
+
+    // 5I-5: Assistant Coach now edits board -> should succeed (200)
+    const asstBoardRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/board/operations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': joinData.sessionId,
+      },
+      body: JSON.stringify({
+        operation: {
+          type: 'set_formation',
+          payload: { formation: '3-4-3' },
+        },
+      }),
+    });
+    assert.strictEqual(asstBoardRes.status, 200, `Assistant Coach board edit should return 200, got ${asstBoardRes.status}`);
+    console.log('   ✓ Assistant Coach successfully modified board');
+
+    // 5I-6: Host revokes Assistant Coach role
+    const revokeAsstRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/participants/${joinData.participant.id}/moderation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({ action: 'revoke_assistant_coach' }),
+    });
+    assert.strictEqual(revokeAsstRes.status, 200);
+    console.log('   ✓ Host revoked Assistant Coach role');
+
+    // 5I-7: Demoted user attempts board edit -> should be rejected (403)
+    const demotedBoardRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/board/operations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': joinData.sessionId,
+      },
+      body: JSON.stringify({
+        operation: {
+          type: 'set_formation',
+          payload: { formation: '5-3-2' },
+        },
+      }),
+    });
+    assert.strictEqual(demotedBoardRes.status, 403, `Demoted player should be rejected with 403, got ${demotedBoardRes.status}`);
+    console.log('   ✓ Demoted participant immediately rejected from modifying board');
+
+    // 5I-8: Host explicitly grants individual board editing to player
+    const grantEditRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/participants/${joinData.participant.id}/moderation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({ action: 'grant_board_edit' }),
+    });
+    assert.strictEqual(grantEditRes.status, 200);
+    console.log('   ✓ Host granted individual board-editing permission to player');
+
+    // 5I-9: Authorized player edits board -> should succeed (200)
+    const authorizedPlayerBoardRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/board/operations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': joinData.sessionId,
+      },
+      body: JSON.stringify({
+        operation: {
+          type: 'move_ball',
+          payload: { position: { x: 5, z: -15 } },
+        },
+      }),
+    });
+    assert.strictEqual(authorizedPlayerBoardRes.status, 200, `Authorized player board edit should return 200, got ${authorizedPlayerBoardRes.status}`);
+    console.log('   ✓ Host-authorized player successfully moved ball on the board');
+
+    // 5I-10: Host revokes board editing from player
+    const revokeEditRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/participants/${joinData.participant.id}/moderation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({ action: 'revoke_board_edit' }),
+    });
+    assert.strictEqual(revokeEditRes.status, 200);
+    console.log('   ✓ Host revoked board-editing permission from player');
+
+    // 5I-11: Revoked player edits board -> should be rejected (403)
+    const revokedPlayerBoardRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/board/operations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': joinData.sessionId,
+      },
+      body: JSON.stringify({
+        operation: {
+          type: 'move_ball',
+          payload: { position: { x: 0, z: 0 } },
+        },
+      }),
+    });
+    assert.strictEqual(revokedPlayerBoardRes.status, 403, `Revoked player board edit should return 403, got ${revokedPlayerBoardRes.status}`);
+    console.log('   ✓ Revoked participant immediately rejected from modifying board');
+
+    // 5J: End Meeting for Everyone Tests
+    console.log('10. Testing End Meeting for Everyone...');
+
+    // 5J-1: Non-host attempts to end meeting -> should be rejected (403 HOST_ONLY_ACTION)
+    const nonHostEndRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/end`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': joinData.sessionId,
+      },
+    });
+    assert.strictEqual(nonHostEndRes.status, 403, `Non-host cannot end meeting, got ${nonHostEndRes.status}`);
+    console.log('   ✓ Non-host cannot end meeting for everyone (403)');
+
+    // 5J-2: Host ends meeting for everyone
+    const hostEndRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/end`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+    });
+    assert.strictEqual(hostEndRes.status, 200, `Host ending meeting should return 200, got ${hostEndRes.status}`);
+    const endData = await hostEndRes.json();
+    assert.strictEqual(endData.meeting.status, 'ended');
+    console.log('   ✓ Host successfully ended meeting for everyone (status: ended)');
+
+    // 5J-3: Check meeting status via GET /api/meetings/:id
+    const getMeetingRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}`);
+    assert.strictEqual(getMeetingRes.status, 200);
+    const meetingInfo = await getMeetingRes.json();
+    assert.strictEqual(meetingInfo.status, 'ended', 'Meeting status must be ended');
+    console.log('   ✓ Meeting status confirmed as ended in shared store');
+
+    // 5J-4: Board operations on ended meeting must be rejected with 410 MEETING_ENDED
+    const endedBoardRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/board/operations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-session-id': createData.sessionId,
+      },
+      body: JSON.stringify({
+        operation: {
+          type: 'set_formation',
+          payload: { formation: '4-3-3' },
+        },
+      }),
+    });
+    assert.strictEqual(endedBoardRes.status, 410, `Ended meeting board operations should return 410, got ${endedBoardRes.status}`);
+    const endedBoardData = await endedBoardRes.json();
+    assert.strictEqual(endedBoardData.code, 'MEETING_ENDED');
+    console.log('   ✓ Board operations on ended meeting rejected with 410 MEETING_ENDED');
+
+    // 5J-5: Attempting to join ended meeting must be rejected with 410 MEETING_ENDED
+    const joinEndedRes = await fetch(`${baseUrl}/api/meetings/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: createData.meeting.code,
+        passcode: createData.meeting.passcode,
+        displayName: 'Late Player',
+        role: 'player',
+      }),
+    });
+    assert.strictEqual(joinEndedRes.status, 410, `Joining ended meeting should return 410, got ${joinEndedRes.status}`);
+    const joinEndedData = await joinEndedRes.json();
+    assert.strictEqual(joinEndedData.code, 'MEETING_ENDED');
+    console.log('   ✓ New participants prevented from joining ended meeting (410 MEETING_ENDED)');
+
+    // 5K: Leave meeting endpoint
     const leaveRes = await fetch(`${baseUrl}/api/meetings/${createData.meeting.id}/leave`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -39,8 +39,18 @@ export const boardOperationSchema = z.object({
 });
 
 export const moderationSchema = z.object({
-  action: z.enum(['admit', 'deny', 'remove', 'mute', 'unmute', 'grant_board_edit', 'revoke_board_edit']),
-  targetParticipantId: z.string().min(1),
+  action: z.enum([
+    'admit',
+    'deny',
+    'remove',
+    'mute',
+    'unmute',
+    'grant_board_edit',
+    'revoke_board_edit',
+    'assign_assistant_coach',
+    'revoke_assistant_coach',
+  ]),
+  targetParticipantId: z.string().min(1).optional(),
 });
 
 export const chatMessageSchema = z.object({

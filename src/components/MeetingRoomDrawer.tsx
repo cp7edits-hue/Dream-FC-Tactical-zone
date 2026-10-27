@@ -21,6 +21,12 @@ import {
   ChevronUp,
   Maximize2,
   Minimize2,
+  Pencil,
+  PencilOff,
+  Eye,
+  Award,
+  UserMinus,
+  AlertTriangle,
 } from 'lucide-react';
 import { MeetingSession } from '../types/tactics';
 import { LiveKitVideoRoom } from './LiveKitVideoRoom';
@@ -46,6 +52,7 @@ interface MeetingRoomDrawerProps {
   onUpdateNotes: (notes: string[]) => void;
   onToggleMic: () => void;
   onLeaveMeeting: () => void;
+  onEndMeeting?: () => void;
   onModerationAction: (participantId: string, action: string) => void;
   onToggleLock: () => void;
   isLocked: boolean;
@@ -63,6 +70,7 @@ export const MeetingRoomDrawer = ({
   onUpdateNotes,
   onToggleMic,
   onLeaveMeeting,
+  onEndMeeting,
   onModerationAction,
   onToggleLock,
   isLocked,
@@ -71,6 +79,7 @@ export const MeetingRoomDrawer = ({
   const [activeTab, setActiveTab] = useState<'video' | 'chat' | 'notes'>('video');
   const [newNote, setNewNote] = useState('');
   const [copied, setCopied] = useState(false);
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
 
   // Synchronized camera state
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
@@ -329,9 +338,9 @@ export const MeetingRoomDrawer = ({
 
           {/* Quick Exit Button */}
           <button
-            onClick={onLeaveMeeting}
+            onClick={() => (isHost ? setShowEndConfirm(true) : onLeaveMeeting())}
             className="p-1.5 rounded-lg bg-rose-950/60 border border-rose-900/80 text-rose-400 hover:bg-rose-900/80 transition-colors cursor-pointer"
-            title={isHost ? 'End Briefing for All' : 'Leave Briefing'}
+            title={isHost ? 'End Briefing for Everyone or Leave' : 'Leave Briefing'}
           >
             <LogOut className="w-3.5 h-3.5" />
           </button>
@@ -486,55 +495,169 @@ export const MeetingRoomDrawer = ({
               <span className="text-[10px] text-emerald-400 font-normal">Realtime Sync</span>
             </div>
 
-            <div className="space-y-1.5">
-              {meeting.participants.map((p) => (
-                <div
-                  key={p.id}
-                  className="flex items-center justify-between p-2 rounded-xl bg-slate-900/60 border border-slate-800/80 text-xs"
-                >
-                  <div className="flex items-center gap-2">
-                    <div
-                      className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] ${p.avatarColor}`}
-                    >
-                      {p.name.slice(0, 1)}
-                    </div>
-                    <div>
-                      <span className="font-semibold text-white block leading-tight">
-                        {p.name} {p.name === myParticipantName && '(You)'}
-                      </span>
-                      <span className="text-[10px] text-slate-400 block">{p.role}</span>
-                    </div>
-                  </div>
+            <div className="space-y-2">
+              {meeting.participants.map((p) => {
+                const isMe = p.name === myParticipantName || p.id === myParticipantId;
+                const isCoach = p.role === 'Head Coach' || p.role === 'host';
+                const isAsstCoach = p.role === 'assistant_coach' || p.role === 'Assistant Coach';
+                const hasBoardControl = isCoach || isAsstCoach || Boolean(p.canEditBoard);
 
-                  {/* Actions / Moderation */}
-                  <div className="flex items-center gap-1.5">
-                    {isHost && p.name !== myParticipantName && (
-                      <button
-                        onClick={() => onModerationAction(p.id, p.isMuted ? 'unmute' : 'mute')}
-                        className="p-1 rounded text-slate-400 hover:text-white transition-colors cursor-pointer"
-                        title={p.isMuted ? 'Unmute participant' : 'Mute participant'}
-                      >
-                        {p.isMuted ? (
-                          <MicOff className="w-3 h-3 text-rose-400" />
+                return (
+                  <div
+                    key={p.id}
+                    className="p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 text-xs space-y-1.5 transition-all"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-[10px] shadow-sm ${
+                            isCoach
+                              ? 'bg-[#a3e635] text-slate-950'
+                              : isAsstCoach
+                              ? 'bg-cyan-500 text-slate-950 font-black'
+                              : p.avatarColor || 'bg-blue-600 text-white'
+                          }`}
+                        >
+                          {p.name.slice(0, 1).toUpperCase()}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-white leading-tight">
+                              {p.name}
+                            </span>
+                            {isMe && (
+                              <span className="text-[9px] px-1 py-0.2 rounded bg-slate-800 text-slate-300 font-medium">
+                                You
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1 mt-0.5">
+                            {isCoach ? (
+                              <span className="px-1.5 py-0.5 rounded bg-[#a3e635]/20 border border-[#a3e635]/40 text-[#a3e635] text-[9px] font-bold flex items-center gap-0.5">
+                                <Shield className="w-2.5 h-2.5" />
+                                Head Coach
+                              </span>
+                            ) : isAsstCoach ? (
+                              <span className="px-1.5 py-0.5 rounded bg-cyan-950/90 border border-cyan-700/80 text-cyan-300 text-[9px] font-bold flex items-center gap-0.5">
+                                <Award className="w-2.5 h-2.5" />
+                                Assistant Coach
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded bg-blue-950/60 border border-blue-900/60 text-blue-300 text-[9px]">
+                                Squad Member
+                              </span>
+                            )}
+
+                            {hasBoardControl ? (
+                              <span
+                                className="px-1.5 py-0.5 rounded bg-emerald-950/70 border border-emerald-700/80 text-emerald-300 text-[9px] font-semibold flex items-center gap-0.5"
+                                title="Has board editing permission"
+                              >
+                                <Pencil className="w-2.5 h-2.5" />
+                                Board Edit
+                              </span>
+                            ) : (
+                              <span
+                                className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400 text-[9px] flex items-center gap-0.5"
+                                title="Read-only: following coach demonstration"
+                              >
+                                <Eye className="w-2.5 h-2.5" />
+                                View Only
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Participant Mute Indicator / Host Quick Mic Toggle */}
+                      <div className="flex items-center gap-1">
+                        {isHost && !isMe ? (
+                          <button
+                            onClick={() => onModerationAction(p.id, p.isMuted ? 'unmute' : 'mute')}
+                            className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                              p.isMuted
+                                ? 'bg-rose-950/80 border-rose-800 text-rose-400 hover:bg-rose-900'
+                                : 'bg-slate-800/80 border-slate-700 text-emerald-400 hover:bg-slate-700'
+                            }`}
+                            title={p.isMuted ? 'Unmute microphone' : 'Mute microphone'}
+                          >
+                            {p.isMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
+                          </button>
+                        ) : p.isMuted ? (
+                          <span className="p-1 text-rose-400" title="Microphone muted">
+                            <MicOff className="w-3 h-3" />
+                          </span>
                         ) : (
-                          <Mic className="w-3 h-3 text-emerald-400" />
+                          <span className="p-1 text-emerald-400" title="Microphone active">
+                            <Mic className="w-3 h-3" />
+                          </span>
                         )}
-                      </button>
-                    )}
 
-                    {p.role === 'Head Coach' || p.role === 'host' ? (
-                      <span className="px-1.5 py-0.5 rounded bg-[#a3e635]/20 text-[#a3e635] text-[10px] font-bold flex items-center gap-0.5">
-                        <Shield className="w-2.5 h-2.5" />
-                        Coach
-                      </span>
-                    ) : (
-                      <span className="px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-300 text-[10px]">
-                        Squad
-                      </span>
+                        {isHost && !isMe && (
+                          <button
+                            onClick={() => onModerationAction(p.id, 'remove')}
+                            className="p-1.5 rounded-lg bg-slate-800/60 hover:bg-rose-950 border border-slate-700 hover:border-rose-800 text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
+                            title="Remove participant from briefing"
+                          >
+                            <UserMinus className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Host Board & Role Permission Controls */}
+                    {isHost && !isMe && (
+                      <div className="pt-1.5 border-t border-slate-800/80 flex items-center justify-between gap-1.5">
+                        <span className="text-[10px] text-slate-500 font-medium">Coach Controls:</span>
+                        <div className="flex items-center gap-1.5">
+                          {/* Assistant Coach Toggle */}
+                          {isAsstCoach ? (
+                            <button
+                              onClick={() => onModerationAction(p.id, 'revoke_assistant_coach')}
+                              className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-[10px] font-medium transition-colors cursor-pointer"
+                              title="Demote from Assistant Coach to regular Player"
+                            >
+                              Revoke Asst Coach
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => onModerationAction(p.id, 'assign_assistant_coach')}
+                              className="px-2 py-0.5 rounded-md bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-700/80 text-[10px] font-semibold transition-colors cursor-pointer flex items-center gap-1"
+                              title="Promote to Assistant Coach (grants board controls)"
+                            >
+                              <Award className="w-2.5 h-2.5" />
+                              <span>Make Asst Coach</span>
+                            </button>
+                          )}
+
+                          {/* Board Edit Toggle (when not an Assistant Coach) */}
+                          {!isAsstCoach && (
+                            p.canEditBoard ? (
+                              <button
+                                onClick={() => onModerationAction(p.id, 'revoke_board_edit')}
+                                className="px-2 py-0.5 rounded-md bg-rose-950/70 hover:bg-rose-900 text-rose-300 border border-rose-800/80 text-[10px] font-medium transition-colors cursor-pointer flex items-center gap-1"
+                                title="Revoke tactical board editing permission"
+                              >
+                                <PencilOff className="w-2.5 h-2.5" />
+                                <span>Revoke Board Edit</span>
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => onModerationAction(p.id, 'grant_board_edit')}
+                                className="px-2 py-0.5 rounded-md bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/80 text-[10px] font-semibold transition-colors cursor-pointer flex items-center gap-1"
+                                title="Grant tactical board editing permission"
+                              >
+                                <Pencil className="w-2.5 h-2.5" />
+                                <span>Grant Board Edit</span>
+                              </button>
+                            )
+                          )}
+                        </div>
+                      </div>
                     )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
@@ -656,25 +779,101 @@ export const MeetingRoomDrawer = ({
           </div>
         )}
 
-        {/* Footer Exit Button */}
-        <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
+        {/* Footer Actions */}
+        <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-1.5">
           <button
             onClick={onClose}
-            className="text-xs text-slate-400 hover:text-white flex items-center gap-1 cursor-pointer"
+            className="text-xs text-slate-400 hover:text-white flex items-center gap-1 cursor-pointer shrink-0"
           >
             <ChevronDown className="w-3.5 h-3.5" />
             <span>Return to Pitch</span>
           </button>
 
-          <button
-            onClick={onLeaveMeeting}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-950/80 border border-rose-800 text-rose-300 hover:bg-rose-900 text-xs font-semibold transition-colors cursor-pointer"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>{isHost ? 'End Briefing' : 'Leave Briefing'}</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            {isHost ? (
+              <>
+                <button
+                  onClick={onLeaveMeeting}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-medium transition-colors cursor-pointer"
+                  title="Leave session without ending it for other squad members"
+                >
+                  Leave
+                </button>
+
+                <button
+                  onClick={() => setShowEndConfirm(true)}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-950/90 border border-rose-800 text-rose-300 hover:bg-rose-900 text-xs font-bold transition-colors cursor-pointer shadow-sm"
+                  title="End tactical briefing for everyone"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>End for All</span>
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={onLeaveMeeting}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-950/80 border border-rose-800 text-rose-300 hover:bg-rose-900 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Leave Briefing</span>
+              </button>
+            )}
+          </div>
         </div>
       </aside>
+
+      {/* Confirmation Modal for Host: End Meeting for Everyone */}
+      {showEndConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-sm rounded-2xl bg-slate-950 border border-slate-800 shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-950/80 border border-rose-800 flex items-center justify-center text-rose-400 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white leading-tight">End Briefing for Everyone?</h3>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  This will mark the session as concluded, disconnect all audio/video streams, and return all squad members to the tactical pitch.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => {
+                  setShowEndConfirm(false);
+                  if (onEndMeeting) {
+                    onEndMeeting();
+                  } else {
+                    onLeaveMeeting();
+                  }
+                }}
+                className="w-full py-2 px-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-md shadow-rose-950/50"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>End Meeting for Everyone</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowEndConfirm(false);
+                  onLeaveMeeting();
+                }}
+                className="w-full py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors cursor-pointer"
+              >
+                Leave Briefing (Keep Session Active)
+              </button>
+
+              <button
+                onClick={() => setShowEndConfirm(false)}
+                className="w-full py-1.5 px-3 rounded-xl text-slate-500 hover:text-slate-300 text-xs transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 };

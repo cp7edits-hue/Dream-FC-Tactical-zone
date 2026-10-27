@@ -1,6 +1,6 @@
 export type MeetingStatus = 'scheduled' | 'active' | 'locked' | 'ended';
 export type BoardPermissionMode = 'coach_only' | 'open_collaboration' | 'host_assigned';
-export type ParticipantRole = 'host' | 'player' | 'collaborator';
+export type ParticipantRole = 'host' | 'player' | 'collaborator' | 'assistant_coach';
 export type AdmissionStatus = 'waiting_lobby' | 'admitted' | 'denied' | 'removed';
 
 export interface ProfileRecord {

@@ -606,47 +606,32 @@ export const api = {
     return null;
   },
 
-  // 6. Submit board operation
+  // 6. Submit board operation (Authenticated server endpoint validates permissions)
   async sendBoardOperation(meetingId: string, operation: { type: string; payload: any }) {
-    // Send to backend endpoint
     const res = await fetch(`/api/meetings/${meetingId}/board/operations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(operation),
     }).catch(() => null);
 
-    // Also update Supabase directly if client configured
-    const supabase = getClientSupabase();
-    if (supabase) {
-      try {
-        const { data: currentBoard } = await supabase.from('tactical_boards').select('*').eq('meeting_id', meetingId).maybeSingle();
-        if (currentBoard) {
-          const nextRevision = (currentBoard.revision || 1) + 1;
-          let nextState = currentBoard.board_state || {};
-          if (operation.type === 'set_formation') {
-            nextState = { ...nextState, formation: operation.payload.formation };
-          } else if (operation.type === 'set_paths') {
-            nextState = { ...nextState, paths: operation.payload.paths };
-          } else if (operation.type === 'add_path') {
-            nextState = { ...nextState, paths: [...(nextState.paths || []), operation.payload.path] };
-          } else if (operation.type === 'clear_paths') {
-            nextState = { ...nextState, paths: [] };
-          } else if (operation.type === 'reset_board' && operation.payload?.boardState) {
-            nextState = { ...nextState, ...operation.payload.boardState };
-          }
-          await supabase.from('tactical_boards').update({
-            board_state: nextState,
-            revision: nextRevision,
-            updated_at: new Date().toISOString(),
-          }).eq('meeting_id', meetingId);
-        }
-      } catch {}
+    if (res) {
+      if (res.status === 403) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(
+          errData?.error || 'Permission denied: Board editing restricted to coach or authorized members.'
+        );
+      }
+      if (res.status === 410) {
+        throw new Error('This tactical session has already ended.');
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.error || 'Board operation failed');
+      }
+      return await res.json();
     }
 
-    if (!res || !res.ok) {
-      return { success: true };
-    }
-    return res.json();
+    return { success: true };
   },
 
   // 7. Realtime SSE & Multi-Channel subscription
@@ -720,6 +705,12 @@ export const api = {
           })
           .on('broadcast', { event: 'chat_message' }, ({ payload }: any) => {
             if (payload) onEvent('chat_message', payload);
+          })
+          .on('broadcast', { event: 'moderation_event' }, ({ payload }: any) => {
+            if (payload) onEvent('moderation_event', payload);
+          })
+          .on('broadcast', { event: 'meeting_ended' }, ({ payload }: any) => {
+            if (payload) onEvent('meeting_ended', payload);
           })
           .subscribe();
       } catch (err) {
@@ -806,14 +797,67 @@ export const api = {
   async moderateParticipant(
     meetingId: string,
     participantId: string,
-    action: 'admit' | 'deny' | 'remove' | 'mute' | 'unmute' | 'grant_board_edit' | 'revoke_board_edit'
+    action:
+      | 'admit'
+      | 'deny'
+      | 'remove'
+      | 'mute'
+      | 'unmute'
+      | 'grant_board_edit'
+      | 'revoke_board_edit'
+      | 'assign_assistant_coach'
+      | 'revoke_assistant_coach'
   ) {
     const res = await fetch(`/api/meetings/${meetingId}/participants/${participantId}/moderation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, targetParticipantId: participantId }),
     }).catch(() => null);
-    return res?.ok ? res.json() : { success: true };
+
+    if (res && !res.ok) {
+      const errData = await res.json().catch(() => null);
+      throw new Error(errData?.error || 'Moderation action failed');
+    }
+
+    const data = res ? await res.json().catch(() => ({ success: true })) : { success: true };
+
+    // Broadcast across Supabase Realtime channel and BroadcastChannel for immediate cross-device sync
+    const supabase = getClientSupabase();
+    if (supabase) {
+      try {
+        const channel = supabase.channel(`dfc_room_${meetingId}`);
+        channel.send({
+          type: 'broadcast',
+          event: 'moderation_event',
+          payload: {
+            targetId: participantId,
+            action,
+            role: data?.target?.role,
+            canEditBoard: data?.target?.can_edit_board,
+            isMuted: data?.target?.is_muted,
+          },
+        });
+      } catch {}
+    }
+
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        const bc = new BroadcastChannel(`dfc_realtime_${meetingId}`);
+        bc.postMessage({
+          type: 'moderation_event',
+          payload: {
+            targetId: participantId,
+            action,
+            role: data?.target?.role,
+            canEditBoard: data?.target?.can_edit_board,
+            isMuted: data?.target?.is_muted,
+          },
+        });
+        bc.close();
+      } catch {}
+    }
+
+    return data;
   },
 
   // 9. Lock meeting
@@ -822,9 +866,39 @@ export const api = {
     return res?.ok ? res.json() : { success: true, status: 'locked' };
   },
 
-  // 10. End meeting
+  // 10. End meeting for everyone (Host only)
   async endMeeting(meetingId: string) {
+    // 1. Send via Supabase Realtime WebSocket broadcast for cross-device notification
+    const supabase = getClientSupabase();
+    if (supabase) {
+      try {
+        const channel = supabase.channel(`dfc_room_${meetingId}`);
+        channel.send({
+          type: 'broadcast',
+          event: 'meeting_ended',
+          payload: { message: 'The coach has ended this briefing.' },
+        });
+      } catch {}
+    }
+
+    // 2. Broadcast across local tabs
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        const bc = new BroadcastChannel(`dfc_realtime_${meetingId}`);
+        bc.postMessage({
+          type: 'meeting_ended',
+          payload: { message: 'The coach has ended this briefing.' },
+        });
+        bc.close();
+      } catch {}
+    }
+
+    // 3. Persist termination on server
     const res = await fetch(`/api/meetings/${meetingId}/end`, { method: 'POST' }).catch(() => null);
+    if (res && !res.ok) {
+      const errData = await res.json().catch(() => null);
+      throw new Error(errData?.error || 'Failed to end meeting for everyone');
+    }
     return res?.ok ? res.json() : { success: true };
   },
 

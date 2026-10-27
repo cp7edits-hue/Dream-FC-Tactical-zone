@@ -111,6 +111,7 @@ export default function App() {
   const [boardRevision, setBoardRevision] = useState(1);
   const [isMeetingDrawerOpen, setIsMeetingDrawerOpen] = useState(false);
   const [savedTacticsOpen, setSavedTacticsOpen] = useState(false);
+  const [meetingEndedInfo, setMeetingEndedInfo] = useState<string | null>(null);
 
   // Legal modal state
   const [legalModal, setLegalModal] = useState<{ isOpen: boolean; tab: LegalTab }>({
@@ -127,6 +128,23 @@ export default function App() {
     const path = window.location.pathname;
     return path === '/404' || (path !== '/' && !path.startsWith('/api') && !path.startsWith('/meetings'));
   });
+
+  // Role-based Board Editing Permission
+  // 1. Solo offline mode -> true
+  // 2. Host coach -> true
+  // 3. Assistant Coach -> true
+  // 4. Host-authorized participant (canEditBoard === true) -> true
+  // All other squad players -> read-only
+  const myParticipant = meeting?.participants.find(
+    (p) => p.id === currentUser.id || p.name === currentUser.name
+  );
+  const isAssistantCoach =
+    myParticipant?.role === 'assistant_coach' ||
+    myParticipant?.role === 'Assistant Coach' ||
+    currentUser.role === 'assistant_coach' ||
+    currentUser.role === 'Assistant Coach';
+  const isAuthorizedPlayer = Boolean(myParticipant?.canEditBoard);
+  const canEditBoard = !meeting || isHost || isAssistantCoach || isAuthorizedPlayer;
 
   // Drawing Tools & Pass Simulation
   const [isDrawingMode, setIsDrawingMode] = useState(false);
@@ -229,16 +247,37 @@ export default function App() {
       } else if (event === 'chat_message') {
         setLatestChatMessage(data);
       } else if (event === 'moderation_event') {
-        if (data.targetId === currentUser.id && data.isMuted !== undefined) {
-          setMeeting((m) => (m ? { ...m, isMicActive: !data.isMuted } : null));
-          showNotification(data.isMuted ? 'You have been muted by the coach' : 'You have been unmuted');
+        const isMe = data.targetId === currentUser.id;
+        if (isMe) {
+          if (data.isMuted !== undefined) {
+            setMeeting((m) => (m ? { ...m, isMicActive: !data.isMuted } : null));
+            showNotification(data.isMuted ? 'You have been muted by the coach' : 'You have been unmuted');
+          }
+          if (data.action === 'assign_assistant_coach') {
+            setCurrentUser((u) => ({ ...u, role: 'assistant_coach' }));
+            showNotification('Promoted to Assistant Coach: Tactical board controls unlocked');
+          } else if (data.action === 'revoke_assistant_coach') {
+            setCurrentUser((u) => ({ ...u, role: 'player' }));
+            showNotification('Assistant Coach role revoked: Board is now view-only');
+          } else if (data.action === 'grant_board_edit') {
+            showNotification('The coach granted you board editing permissions');
+          } else if (data.action === 'revoke_board_edit') {
+            showNotification('Your board editing permissions have been revoked by the coach');
+          }
         }
         setMeeting((prev) => {
           if (!prev) return null;
           return {
             ...prev,
             participants: prev.participants.map((p) =>
-              p.id === data.targetId ? { ...p, isMuted: data.isMuted ?? p.isMuted } : p
+              p.id === data.targetId
+                ? {
+                    ...p,
+                    isMuted: data.isMuted !== undefined ? data.isMuted : p.isMuted,
+                    role: data.role !== undefined ? (data.role === 'host' ? 'Head Coach' : data.role) : p.role,
+                    canEditBoard: data.canEditBoard !== undefined ? data.canEditBoard : p.canEditBoard,
+                  }
+                : p
             ),
           };
         });
@@ -246,7 +285,8 @@ export default function App() {
         setIsMeetingLocked(data.status === 'locked');
         showNotification(data.status === 'locked' ? 'Meeting has been locked by the coach' : 'Meeting unlocked');
       } else if (event === 'meeting_ended') {
-        showNotification('The coach has ended this tactical session');
+        showNotification('The coach has ended this briefing.');
+        setMeetingEndedInfo(data.message || 'The coach has ended this briefing.');
         setMeeting(null);
         setIsMeetingDrawerOpen(false);
       }
@@ -265,6 +305,13 @@ export default function App() {
     const pollInterval = setInterval(async () => {
       try {
         const info = await api.getMeeting(meeting.id);
+        if (info && info.status === 'ended') {
+          setMeetingEndedInfo('The coach has ended this briefing.');
+          setMeeting(null);
+          setIsMeetingDrawerOpen(false);
+          return;
+        }
+
         if (info && Array.isArray(info.participants) && info.participants.length > 0) {
           setMeeting((prev) => {
             if (!prev) return null;
@@ -282,15 +329,21 @@ export default function App() {
                   role: p.role === 'host' ? 'Head Coach' : p.role,
                   isMuted: p.isMuted ?? false,
                   isSpeaking: false,
+                  canEditBoard: p.canEditBoard ?? false,
                   avatarColor: p.role === 'Head Coach' || p.role === 'host' ? 'bg-[#a3e635] text-slate-950' : 'bg-blue-600 text-white',
                 });
                 changed = true;
               } else {
-                if (updatedList[idx].role !== p.role || updatedList[idx].isMuted !== p.isMuted) {
+                if (
+                  updatedList[idx].role !== p.role ||
+                  updatedList[idx].isMuted !== p.isMuted ||
+                  updatedList[idx].canEditBoard !== p.canEditBoard
+                ) {
                   updatedList[idx] = {
                     ...updatedList[idx],
                     role: p.role === 'host' ? 'Head Coach' : p.role,
                     isMuted: p.isMuted ?? updatedList[idx].isMuted,
+                    canEditBoard: p.canEditBoard ?? updatedList[idx].canEditBoard,
                   };
                   changed = true;
                 }
@@ -326,6 +379,10 @@ export default function App() {
   // --- ACTIONS ---
 
   const handleSelectFormation = (f: FormationType) => {
+    if (!canEditBoard) {
+      showNotification('Tactical board is in view-only mode for players');
+      return;
+    }
     setCurrentFormation(f);
     playFormationChime();
 
@@ -364,10 +421,18 @@ export default function App() {
   };
 
   const handleResetFormation = () => {
+    if (!canEditBoard) {
+      showNotification('Tactical board is in view-only mode for players');
+      return;
+    }
     handleSelectFormation(currentFormation);
   };
 
   const handleSelectDrill = (drill: TacticalDrill) => {
+    if (!canEditBoard) {
+      showNotification('Tactical plans can only be changed by authorized coaching staff');
+      return;
+    }
     setSelectedDrillId(drill.id);
     handleSelectFormation(drill.formation);
     setUndoStack((prev) => [...prev, paths]);
@@ -392,6 +457,10 @@ export default function App() {
 
   const handlePlayerMove = useCallback(
     (playerId: string, pos: { x: number; z: number }) => {
+      if (!canEditBoard) {
+        showNotification('Board is in view-only mode for squad players');
+        return;
+      }
       setHomePlayers((prev) =>
         prev.map((p) => (p.id === playerId ? { ...p, position: pos } : p))
       );
@@ -408,11 +477,12 @@ export default function App() {
         });
       }
     },
-    [meeting?.id]
+    [meeting?.id, canEditBoard]
   );
 
   const handleBallMove = useCallback(
     (pos: { x: number; z: number }) => {
+      if (!canEditBoard) return;
       setBallPosition(pos);
       if (meeting?.id) {
         api.sendBoardOperation(meeting.id, {
@@ -421,11 +491,15 @@ export default function App() {
         }).catch(() => {});
       }
     },
-    [meeting?.id]
+    [meeting?.id, canEditBoard]
   );
 
   const handlePathDrawn = useCallback(
     (newPath: TacticalPath) => {
+      if (!canEditBoard) {
+        showNotification('Drawing tools are reserved for authorized coaches');
+        return;
+      }
       setPaths((prev) => {
         setUndoStack((u) => [...u, prev]);
         setRedoStack([]);
@@ -446,10 +520,14 @@ export default function App() {
         });
       }
     },
-    [meeting?.id]
+    [meeting?.id, canEditBoard]
   );
 
   const handleUndo = () => {
+    if (!canEditBoard) {
+      showNotification('Board is in view-only mode');
+      return;
+    }
     if (undoStack.length === 0) return;
     const previous = undoStack[undoStack.length - 1];
     setUndoStack((prev) => prev.slice(0, prev.length - 1));
@@ -466,6 +544,10 @@ export default function App() {
   };
 
   const handleRedo = () => {
+    if (!canEditBoard) {
+      showNotification('Board is in view-only mode');
+      return;
+    }
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
     setRedoStack((prev) => prev.slice(0, prev.length - 1));
@@ -482,6 +564,10 @@ export default function App() {
   };
 
   const handleClearPaths = () => {
+    if (!canEditBoard) {
+      showNotification('Board is in view-only mode');
+      return;
+    }
     setUndoStack((prev) => [...prev, paths]);
     setRedoStack([]);
     setPaths([]);
@@ -496,6 +582,10 @@ export default function App() {
   };
 
   const handleSelectDrawTool = (tool: TacticalPathType | 'pointer') => {
+    if (!canEditBoard && tool !== 'pointer') {
+      showNotification('Drawing tools are reserved for authorized coaches');
+      return;
+    }
     if (tool === 'pointer') {
       setIsDrawingMode(false);
     } else {
@@ -505,6 +595,10 @@ export default function App() {
   };
 
   const handlePlaySimulation = () => {
+    if (!canEditBoard) {
+      showNotification('Simulation playback controls are reserved for coaches');
+      return;
+    }
     const passes = paths.filter((p) => p.type === 'pass');
     if (passes.length === 0) {
       showNotification('Draw at least one pass before starting simulation');
@@ -522,6 +616,7 @@ export default function App() {
   };
 
   const handlePauseSimulation = () => {
+    if (!canEditBoard) return;
     sceneRef.current?.pauseSimulation();
     setSimulationStatus('paused');
     if (meeting?.id) {
@@ -533,6 +628,7 @@ export default function App() {
   };
 
   const handleResumeSimulation = () => {
+    if (!canEditBoard) return;
     sceneRef.current?.resumeSimulation();
     setSimulationStatus('playing');
     if (meeting?.id) {
@@ -544,6 +640,7 @@ export default function App() {
   };
 
   const handleResetSimulation = () => {
+    if (!canEditBoard) return;
     sceneRef.current?.resetSimulation();
     setSimulationStatus('idle');
     setCurrentSimPassIndex(0);
@@ -557,6 +654,10 @@ export default function App() {
   };
 
   const handleDeletePass = (passId: string) => {
+    if (!canEditBoard) {
+      showNotification('Board is in view-only mode');
+      return;
+    }
     setPaths((prev) => {
       setUndoStack((u) => [...u, prev]);
       setRedoStack([]);
@@ -580,6 +681,7 @@ export default function App() {
   };
 
   const handleMovePassUp = (passIdx: number) => {
+    if (!canEditBoard) return;
     setPaths((prev) => {
       const passes = prev.filter((p) => p.type === 'pass');
       const others = prev.filter((p) => p.type !== 'pass');
@@ -605,6 +707,7 @@ export default function App() {
   };
 
   const handleMovePassDown = (passIdx: number) => {
+    if (!canEditBoard) return;
     setPaths((prev) => {
       const passes = prev.filter((p) => p.type === 'pass');
       const others = prev.filter((p) => p.type !== 'pass');
@@ -724,14 +827,10 @@ export default function App() {
   const handleLeaveMeeting = async () => {
     if (meeting?.id) {
       try {
-        if (isHost) {
-          await api.endMeeting(meeting.id);
-        } else {
-          await api.leaveMeeting(meeting.id, {
-            id: currentUser.id,
-            name: currentUser.name,
-          });
-        }
+        await api.leaveMeeting(meeting.id, {
+          id: currentUser.id,
+          name: currentUser.name,
+        });
       } catch {}
     }
     setMeeting(null);
@@ -739,7 +838,23 @@ export default function App() {
     showNotification('Left strategy room');
   };
 
+  const handleEndMeeting = async () => {
+    if (!meeting?.id || !isHost) return;
+    try {
+      await api.endMeeting(meeting.id);
+      showNotification('The coach has ended this briefing.');
+    } catch (err: any) {
+      showNotification(err.message || 'Failed to end briefing');
+    }
+    setMeeting(null);
+    setIsMeetingDrawerOpen(false);
+  };
+
   const handleAddRunForPlayer = (player: Player) => {
+    if (!canEditBoard) {
+      showNotification('Board is in view-only mode for squad players');
+      return;
+    }
     const endZ = player.team === 'home' ? player.position.z - 14 : player.position.z + 14;
     const newPath: TacticalPath = {
       id: 'run_' + Date.now(),
@@ -770,8 +885,9 @@ export default function App() {
         paths={paths}
         activePlayerId={activePlayerId}
         cameraPreset={cameraPreset}
-        isDrawingMode={isDrawingMode}
+        isDrawingMode={canEditBoard && isDrawingMode}
         drawingType={drawingType}
+        canEditBoard={canEditBoard}
         onPlayerSelect={(id) => setActivePlayerId(id)}
         onPlayerMove={handlePlayerMove}
         onBallMove={handleBallMove}
@@ -790,6 +906,7 @@ export default function App() {
 
       {/* 2. TOP NAVBAR */}
       <TopNavbar
+        canEditBoard={canEditBoard}
         cameraPreset={cameraPreset}
         onSelectCameraPreset={(p) => setCameraPreset(p)}
         selectedDrillId={selectedDrillId}
@@ -818,6 +935,7 @@ export default function App() {
       {/* 4. CONSOLIDATED BOTTOM DOCK */}
       {!is404Active && (
         <TacticalDock
+          canEditBoard={canEditBoard}
           currentFormation={currentFormation}
           onSelectFormation={handleSelectFormation}
           teamDisplay={teamDisplay}
@@ -849,6 +967,7 @@ export default function App() {
       {/* 5. PLAYER CARD INSPECTOR MODAL */}
       <PlayerCardModal
         player={selectedPlayer}
+        canEditBoard={canEditBoard}
         onClose={() => setActivePlayerId(null)}
         onAddRunForPlayer={handleAddRunForPlayer}
       />
@@ -873,6 +992,7 @@ export default function App() {
           onUpdateNotes={(notes) => setMeeting({ ...meeting, notes })}
           onToggleMic={() => setMeeting({ ...meeting, isMicActive: !meeting.isMicActive })}
           onLeaveMeeting={handleLeaveMeeting}
+          onEndMeeting={handleEndMeeting}
           onModerationAction={handleModeration}
           onToggleLock={handleToggleLock}
           isLocked={isMeetingLocked}
@@ -929,6 +1049,32 @@ export default function App() {
         onOpenContact={() => setContactModalOpen(true)}
         onOpen404={() => setIs404Active(true)}
       />
+
+      {/* 13. MEETING CONCLUDED OVERLAY MODAL */}
+      {meetingEndedInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-fade-in">
+          <div className="w-full max-w-md rounded-2xl border border-red-500/40 bg-[#0d1527] p-6 shadow-2xl text-center">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-red-500/20 text-red-400">
+              <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </div>
+            <h3 className="text-xl font-bold text-white tracking-wide">Briefing Concluded</h3>
+            <p className="mt-2 text-sm text-slate-300 leading-relaxed font-medium">
+              {meetingEndedInfo}
+            </p>
+            <p className="mt-1 text-xs text-slate-400">
+              Audio, video, and tactical synchronization have been cleanly closed.
+            </p>
+            <button
+              onClick={() => setMeetingEndedInfo(null)}
+              className="mt-6 w-full rounded-xl bg-gradient-to-r from-[#a3e635] to-[#84cc16] px-5 py-2.5 text-sm font-bold text-slate-950 shadow-lg hover:brightness-110 active:scale-95 transition-all cursor-pointer"
+            >
+              Return to Tactical Pitch
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

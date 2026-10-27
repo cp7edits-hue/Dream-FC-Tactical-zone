@@ -34,6 +34,7 @@ export class PitchScene {
   private dragPlaneIntersection: THREE.Vector3 = new THREE.Vector3();
   private isPointerDown: boolean = false;
   private hoveredPlayerId: string | null = null;
+  private canEditBoard: boolean = true;
 
   // Tactical drawing state
   private isDrawingMode: boolean = false;
@@ -1022,8 +1023,23 @@ export class PitchScene {
     this.simulationSpeed = Math.max(0.5, Math.min(speed, 3.0));
   }
 
+  public setCanEditBoard(canEdit: boolean) {
+    this.canEditBoard = canEdit;
+    if (!canEdit) {
+      this.draggedEntity = null;
+      if (this.isDrawingMode) {
+        this.setDrawingMode(false);
+      }
+    }
+  }
+
   // --- DRAWING MODE SETTER ---
   public setDrawingMode(enabled: boolean, type: 'pass' | 'run' | 'press' | 'zone' = 'pass') {
+    if (!this.canEditBoard && enabled) {
+      this.isDrawingMode = false;
+      this.controls.enabled = true;
+      return;
+    }
     this.isDrawingMode = enabled;
     this.currentDrawType = type;
     this.controls.enabled = !enabled; // disable camera orbit while drawing
@@ -1059,6 +1075,7 @@ export class PitchScene {
       if (!hit) return;
 
       if (this.isDrawingMode) {
+        if (!this.canEditBoard) return;
         // Find if snapping to an origin player or ball
         let snapStartPlayerId: string | null = null;
         let snapStartPlayerName: string | null = null;
@@ -1092,7 +1109,7 @@ export class PitchScene {
       }
 
       // Check if clicking on ball
-      if (this.ballMesh) {
+      if (this.ballMesh && this.canEditBoard) {
         const ballDist = Math.hypot(hit.x - this.ballMesh.position.x, hit.z - this.ballMesh.position.z);
         if (ballDist < 1.8) {
           this.draggedEntity = { id: 'ball', isBall: true, group: this.ballMesh };
@@ -1111,12 +1128,16 @@ export class PitchScene {
         if (dist < closestDist) {
           closestDist = dist;
           clickedPlayerId = id;
-          this.draggedEntity = { id, isBall: false, group: grp };
+          if (this.canEditBoard) {
+            this.draggedEntity = { id, isBall: false, group: grp };
+          }
         }
       });
 
       if (clickedPlayerId) {
-        this.controls.enabled = false;
+        if (this.canEditBoard) {
+          this.controls.enabled = false;
+        }
         this.setActivePlayer(clickedPlayerId);
         this.onPlayerSelect?.(clickedPlayerId);
         playMarkerClickSound();
